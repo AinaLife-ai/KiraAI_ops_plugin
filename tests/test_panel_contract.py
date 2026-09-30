@@ -181,6 +181,21 @@ def main():
         assert panes == {"access", "risk", "control", "protected", "backup", "audit", "store"}, panes
     check("every tab has a matching pane", panes_exist)
 
+    # ---------------------------------------------------------------- assets
+    def menu_icon_asset():
+        """The sidebar icon must ship with the plugin and stay inside the root."""
+        main_py = (PLUGIN_DIR / "main.py").read_text(encoding="utf-8")
+        paths = re.findall(r'icon="([^"]+\.svg)"', main_py)
+        assert paths, "no SVG menu icon referenced in main.py"
+        for rel in paths:
+            asset = (PLUGIN_DIR / rel).resolve()
+            assert asset.is_file(), f"menu icon missing: {rel}"
+            assert asset.is_relative_to(PLUGIN_DIR.resolve()), f"icon escapes plugin root: {rel}"
+            text = asset.read_text(encoding="utf-8")
+            assert text.lstrip().startswith("<svg"), f"{rel} is not an SVG"
+            assert "currentColor" in text, f"{rel} should inherit the menu colour (currentColor)"
+    check("the sidebar icon ships with the plugin", menu_icon_asset)
+
     # ---------------------------------------------------------------- api paths
     def api_paths_exist():
         main_py = (PLUGIN_DIR / "main.py").read_text(encoding="utf-8")

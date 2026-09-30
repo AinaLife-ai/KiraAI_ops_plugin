@@ -1141,7 +1141,11 @@ class KiraOpsPlugin(BasePlugin):
 
     @register.page(
         "/index",
-        menu=PageMenu(label={"zh": "运行自控台", "en": "Ops Console"}, icon="Monitor", order=86),
+        # icon: an SVG shipped with the plugin (v2.34.5+) - a control panel with a
+        # gauge, deliberately unlike the Element Plus "Monitor" glyph other
+        # plugins already use in the sidebar.
+        menu=PageMenu(label={"zh": "运行自控台", "en": "Ops Console"},
+                      icon="assets/icon.svg", order=86),
     )
     def page(self):
         return PluginPage.from_folder("./web")
