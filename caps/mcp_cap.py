@@ -110,7 +110,7 @@ class McpCap(Capability):
             try:
                 server = mgr.add_or_update_server_from_config(name, desc, cfg)
             except Exception as exc:
-                return fail(f"add MCP server failed: {exc}")
+                return fail(f"add MCP server failed: {exc!r}")
             return ok(server_id=server.id, name=server.name)
         if action == "update":
             s, err = self._server(params.get("server_id"))
@@ -123,7 +123,7 @@ class McpCap(Capability):
                 await mgr.update_server_from_editor(s.id, params.get("name") or s.name,
                                                     str(params.get("description") or s.description), editor)
             except Exception as exc:
-                return fail(f"update MCP server failed: {exc}")
+                return fail(f"update MCP server failed: {exc!r}")
             return ok(server_id=s.id)
         if action in ("enable", "disable"):
             s, err = self._server(params.get("server_id"))
@@ -135,7 +135,7 @@ class McpCap(Capability):
                 else:
                     await mgr.disable_server(s.id)
             except Exception as exc:
-                return fail(f"{action} MCP server failed: {exc}")
+                return fail(f"{action} MCP server failed: {exc!r}")
             return ok(server_id=s.id, enabled=(action == "enable"))
         if action == "tool_toggle":
             s, err = self._server(params.get("server_id"))
@@ -167,6 +167,6 @@ class McpCap(Capability):
             try:
                 await mgr.delete_server(s.id)
             except Exception as exc:
-                return fail(f"delete MCP server failed: {exc}")
+                return fail(f"delete MCP server failed: {exc!r}")
             return ok(server_id=s.id, deleted=True)
         return fail(f"unknown write action '{action}'")

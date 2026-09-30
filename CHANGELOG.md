@@ -66,6 +66,44 @@
   （WebUI 路由对象上的 lifecycle），加缓存，并在全部失败时**告警一次**，
   让"重启/关机为什么拒绝执行"可见。
 
+### 安全与一致性（第三轮：对抗性审查，非测试套件驱动）
+
+这一轮不依赖已有测试，改用「能读到什么 / 并发会怎样 / 失败留下什么 / 契约是否对得上」
+四类探针去打，抓到下面这些：
+
+- **严重 · `log.read_file` 曾是「data/ 下任意文件读取」**：`config.get` 有打码，但同一个会话可以
+  用 `read_file` 直接把 `data/config/system_config.json`（明文 `api_key`）和
+  `data/memory/chat_memory.json`（全部聊天记录）读进上下文，**打码形同虚设**。
+  现在该动作**只允许读日志**（文件名匹配 `*.log` / `log.log*`），并叠加 `path_deny_read` 检查。
+- **严重 · 打码盲区**：`Authorization` / `Bearer` / `Cookie` 不在关键词表里，于是
+  `mcp.info` 会把 `headers: {"Authorization": "Bearer …"}` 明文吐给模型。
+  现在新增**内置底线 `ALWAYS_MASK`**（api_key/authorization/bearer/cookie/secret/password/
+  credential/token/private_key），**配置里删不掉**，读打码与写禁止都生效。
+- **严重 · 一个畸形 session id 能永久写坏 `chat_memory.json`**：
+  `session.title` 等写动作原先接受任意 target，写进一个不合法的 key 之后，
+  框架 `SessionManager.get_session_info()`（它按 `:` 切分并取第 3 段）会**永久抛 IndexError**，
+  连带**内置 session_tools 插件**与 WebUI 的会话枚举一起挂掉（含内存态的 `session.list` 与面板计数）。
+  现在：① 写入/查询前校验 `adapter:type:id`；② `session.list` 走容错枚举（回落到原始 store），
+  并把脏键列在 `malformed_keys` 里；③ `session.delete` 是唯一接受畸形 id 的动作，
+  专门用来**修复历史脏数据**（1.0.0 部署可能存在）。
+- **中 · 并发同名快照会互相覆盖**：框架同一轮会并行跑工具，快照又在工作线程里执行，
+  5 个并发同名快照实测只生成 3 个目录，`_meta.json` 被后写者覆盖 ⇒ 回滚点丢失。
+  现在目录用 `exist_ok=False` **原子占位** + 线程锁，重试加后缀。
+- **中 · 写失败仍把备份标成 `applied`**：语义反了（没生效的写被记成已应用）⇒ 只在成功时标记。
+- **中 · 审计 `args` 不截断**：一条 200 键的配置写入实测记了 **43,180 字符**，
+  审计文件与后续 `audit.tail` 都被拖累 ⇒ 上限 2000 字符 + 400 字符预览。
+- **中 · 回滚备份目录放在 `data/plugins/` 里**：框架启动会遍历该目录并尝试加载，
+  一次崩溃残留就会在插件列表里冒出一个「加载失败」的假插件 ⇒ 移到 `data/temp/kira_ops_rollback/`。
+- **低 · 模型传畸形参数会抛异常**：`args` 传字符串/数组、`limit` 传 `"abc"` 会直接 ValueError
+  ⇒ 新增 `to_int()` 与「非 dict args 一律忽略」，全部动作对畸形输入免疫。
+- **低 · 错误信息可能为空**（`fetch_remote_models failed: `）⇒ 异常插值统一用 `{exc!r}`。
+
+**审计方法（可复现）**：`adversarial_probe.py`（读取逃逸 / 并发 / 状态残留）、
+`action_matrix.py`（12 域 × 全部动作在真实框架上逐个真跑，含高危令牌流程）、
+面板↔API 契约比对、框架 API 存在性核对。
+**结论**：全动作矩阵 **0 异常、0 缺错误信息**；面板用到的字段与 API 路径 100% 对齐；
+并发压测无损坏记录。
+
 ### 返回体精简与格式（同一批修复内的第二轮）
 
 - **工具返回值改为紧凑 JSON**：框架构建 tool 消息时会 `str(result)`，所以原来模型看到的是
@@ -102,9 +140,9 @@
 - 文档：README 与设计文档全面修订（仓库地址、作者、core_version、安全说明、
   安装/更新与回滚流程、扩展点用法、测试清单）。
 
-### 测试（47 → 91 项）
+### 测试（47 → 99 项）
 
-- 新增 `tests/test_integration_real.py`（**40 项**）：**用真实框架对象**（KiraConfig /
+- 新增 `tests/test_integration_real.py`（**48 项**）：**用真实框架对象**（KiraConfig /
   DatabaseService / ProviderManager / FuncToolManager / PersonaManager / SessionManager /
   MCPManager / SkillsManager / PluginManager）加载插件并逐域驱动，
   覆盖 12 域全部只读动作 + 上述每一条修复，含「更新后子模块必须是新代码」和
@@ -112,6 +150,8 @@
   其余三套旧测试全是桩件（FakeCtx/FakeMcpMgr/...）——桩件能证明逻辑，
   **证明不了契约**，class-vs-instance 与陈旧子模块两个 bug 正是这样漏过去的。
 - `tests/test_kira_ops.py` 17 → **21 项**（新增 `apply_limit` / 日志截断 / brief 裁剪 / 能力名校验）。
+- 集成套件 40 → **48 项**：新增 `read_file` 范围、打码底线、并发快照唯一性、审计体积上限、
+  畸形参数免疫、畸形 session id 拒写与脏键修复（含对历史脏数据的自动修复断言）。
 - 反向验证：把新测试跑在 1.0.0 代码上，**16 项精确变红**。
 
 ## 1.0.0

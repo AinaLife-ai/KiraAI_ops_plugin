@@ -25,11 +25,13 @@ import json
 import os
 import shutil
 import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Optional
 
 from core.plugin import logger
+from core.utils.path_utils import get_data_path
 from core.plugin.plugin_installer import (
     MAX_PLUGIN_ARCHIVE_BYTES,
     MAX_PLUGIN_ARCHIVE_COMPRESSION_RATIO,
@@ -68,11 +70,23 @@ def _existing_plugin_dir(plugin_mgr, plugin_id: str) -> Optional[Path]:
 # ---------------------------------------------------------------------------
 
 
+def _rollback_root() -> Path:
+    """Scratch space for rollback copies.
+
+    It must live outside the plugins directory: the framework scans
+    ``data/plugins/*`` at startup and would try to load a leftover copy as a
+    plugin (reporting it as a broken plugin in the WebUI).
+    """
+    return get_data_path() / "temp" / "kira_ops_rollback"
+
+
 async def _stage_backup(dest: Optional[Path]) -> Optional[Path]:
     """Copy the current plugin directory aside so a failed update can roll back."""
     if dest is None or not dest.exists():
         return None
-    backup = dest.with_name(f"{dest.name}.bak-{int(time.time())}")
+    root = _rollback_root()
+    root.mkdir(parents=True, exist_ok=True)
+    backup = root / f"{dest.name}-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     try:
         shutil.rmtree(backup, ignore_errors=True)
         await _to_thread(shutil.copytree, dest, backup)
@@ -101,6 +115,12 @@ async def _restore_backup(plugin_mgr, plugin_id: str, dest: Path, backup: Option
 def _drop_backup(backup: Optional[Path]) -> None:
     if backup is not None:
         shutil.rmtree(backup, ignore_errors=True)
+        try:
+            parent = backup.parent
+            if parent.name == "kira_ops_rollback" and not any(parent.iterdir()):
+                parent.rmdir()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

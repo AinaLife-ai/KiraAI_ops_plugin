@@ -113,6 +113,19 @@ def register_capability(cls) -> tuple:
     return True, name
 
 
+def to_int(value, default: int, lo: int = None, hi: int = None) -> int:
+    """Best-effort int conversion - tool arguments come straight from the model."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = int(default)
+    if lo is not None:
+        number = max(lo, number)
+    if hi is not None:
+        number = min(hi, number)
+    return number
+
+
 def apply_limit(items: list, params: dict, default: int = 0, cap: int = 200) -> tuple:
     """Apply the optional ``limit`` parameter: returns ``(items, truncated)``."""
     try:

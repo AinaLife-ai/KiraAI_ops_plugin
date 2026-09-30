@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import shutil
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -49,6 +50,9 @@ def _folder_size(folder: Path) -> int:
 class BackupManager:
     def __init__(self, base_dir, settings: dict = None):
         self.dir = Path(base_dir) / "backups"
+        # The framework runs same-step tool calls in parallel and snapshots run
+        # in a worker thread, so two snapshots can land in the same second.
+        self._lock = threading.Lock()
         self.apply_settings(settings or {})
 
     def apply_settings(self, settings: dict) -> None:
@@ -95,12 +99,18 @@ class BackupManager:
 
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         base = f"{stamp}_{_safe_label(label)}"
-        folder = self.dir / base
-        counter = 1
-        while folder.exists():
-            folder = self.dir / f"{base}_{counter}"
-            counter += 1
-        folder.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            folder = self.dir / base
+            counter = 1
+            # exist_ok=False makes the claim atomic: a racing snapshot retries
+            # with a new suffix instead of silently writing into our folder.
+            while True:
+                try:
+                    folder.mkdir(parents=True, exist_ok=False)
+                    break
+                except FileExistsError:
+                    counter += 1
+                    folder = self.dir / f"{base}_{counter}"
 
         entries = []
         for src in sources:

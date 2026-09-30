@@ -7,6 +7,31 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 
+# A single config/plugin write can carry a huge patch; storing it verbatim
+# bloated the audit files (43k characters for one 200-key patch) and every
+# audit.tail call afterwards dragged it into the model context.
+MAX_ARGS_CHARS = 2000
+ARGS_PREVIEW_CHARS = 400
+
+
+def _compact_args(args) -> object:
+    """Return a size-capped, JSON-safe copy of a write payload."""
+    try:
+        text = json.dumps(args, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(args)
+    if len(text) <= MAX_ARGS_CHARS:
+        try:
+            return json.loads(text)
+        except Exception:
+            return text
+    return {
+        "_truncated": True,
+        "_size": len(text),
+        "_preview": text[:ARGS_PREVIEW_CHARS],
+    }
+
+
 class AuditLog:
     def __init__(self, base_dir, settings: dict = None):
         self.dir = Path(base_dir) / "audit"
@@ -36,11 +61,7 @@ class AuditLog:
                 "backup": str(backup or ""), "note": str(note or ""),
             }
             if args is not None:
-                try:
-                    json.dumps(args, ensure_ascii=False)
-                    record["args"] = args
-                except TypeError:
-                    record["args"] = str(args)
+                record["args"] = _compact_args(args)
             self.dir.mkdir(parents=True, exist_ok=True)
             path = self.dir / f"audit-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
             with path.open("a", encoding="utf-8") as fh:

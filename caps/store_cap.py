@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, fail, ok, register
+from . import Capability, fail, ok, register, to_int
 
 
 @register
@@ -24,7 +24,7 @@ class StoreCap(Capability):
                 keyword=str(params.get("keyword") or ""),
                 author=str(params.get("author") or ""),
                 tag=str(params.get("tag") or ""),
-                limit=int(params.get("limit") or 0),
+                limit=to_int(params.get("limit"), 0, 0, 50),
             )
         return fail(f"unknown read action '{action}'")
 

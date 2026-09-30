@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 from core.plugin import BasePlugin, PageMenu, PluginPage, Priority, logger, on, register
+from core.chat import Session
 from core.chat.message_utils import KiraMessageBatchEvent
 from core.provider import LLMRequest
 from core.utils.path_utils import get_config_path, get_data_path
@@ -236,6 +237,39 @@ class KiraOpsPlugin(BasePlugin):
     def log(self, message: str):
         logger.info(f"[kira_ops] {message}")
 
+    def session_inventory(self) -> tuple:
+        """List sessions, tolerating malformed keys in chat_memory.
+
+        ``SessionManager.get_session_info()`` (no argument) splits every key on
+        ':' and indexes part 2, so a single junk key - e.g. one written by an
+        older build with a bogus session id - makes it raise IndexError for
+        *everyone*, including the builtin session tools. Fall back to the raw
+        store instead of failing the whole session domain, and report the bad
+        keys so they can be cleaned up.
+        """
+        sm = getattr(self.ctx, "session_mgr", None)
+        if sm is None:
+            return [], []
+        try:
+            return list(sm.get_session_info() or []), []
+        except Exception as exc:
+            logger.warning(f"[kira_ops] session enumeration failed ({exc}); using raw keys")
+        raw = getattr(sm, "chat_memory", None)
+        if not isinstance(raw, dict):
+            return [], []
+        sessions, skipped = [], []
+        for sid in list(raw.keys()):
+            parts = str(sid).split(":", 2)
+            if len(parts) < 3 or not parts[0] or not parts[1] or not parts[2]:
+                skipped.append(str(sid))
+                continue
+            data = raw.get(sid) or {}
+            sessions.append(Session(
+                adapter_name=parts[0], session_type=parts[1], session_id=parts[2],
+                session_title=data.get("title"), session_description=data.get("description"),
+                timestamp=data.get("timestamp")))
+        return sessions, skipped
+
     def mask(self, data):
         return self.engine.mask_for_read(data)
 
@@ -414,7 +448,7 @@ class KiraOpsPlugin(BasePlugin):
                                 max_bytes=MAX_PLUGIN_ARCHIVE_BYTES)
             payload = await asyncio.to_thread(temp_zip.read_bytes)
         except Exception as exc:
-            return {"ok": False, "error": f"skill download failed: {exc}"}
+            return {"ok": False, "error": f"skill download failed: {exc!r}"}
         finally:
             temp_zip.unlink(missing_ok=True)
 
@@ -422,7 +456,7 @@ class KiraOpsPlugin(BasePlugin):
             target = await install_skill_from_zip_bytes(
                 get_data_path() / "skills", payload, name, overwrite=overwrite)
         except Exception as exc:
-            return {"ok": False, "error": f"skill install failed: {exc}"}
+            return {"ok": False, "error": f"skill install failed: {exc!r}"}
 
         sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
         if sm:
@@ -556,8 +590,9 @@ class KiraOpsPlugin(BasePlugin):
         return ""
 
     @staticmethod
-    def _normalize_params(cap_name: str, params: dict, target: str = "") -> dict:
-        params = dict(params or {})
+    def _normalize_params(cap_name: str, params, target: str = "") -> dict:
+        # tool arguments come from the model: a str/list here must not raise
+        params = dict(params) if isinstance(params, dict) else {}
         if target:
             params.setdefault(TARGET_ALIASES.get(cap_name, "target"), target)
             params.setdefault("target", target)
@@ -626,7 +661,7 @@ class KiraOpsPlugin(BasePlugin):
         if not isinstance(result, dict):
             result = {"ok": True, "result": result}
 
-        if backup.get("id"):
+        if result.get("ok") and backup.get("id"):
             try:
                 await asyncio.to_thread(self.backups.mark_applied, backup["id"])
             except Exception:
@@ -712,11 +747,10 @@ class KiraOpsPlugin(BasePlugin):
             mcp = getattr(getattr(self.ctx, "message_processor", None), "mcp_manager", None)
             out["mcp"] = {"total": len(mcp.servers) if mcp else 0}
         if "sessions" in parts:
-            try:
-                sessions = self.ctx.session_mgr.get_session_info() or []
-            except Exception:
-                sessions = []
+            sessions, skipped = self.session_inventory()
             out["sessions"] = {"total": len(sessions)}
+            if skipped:
+                out["sessions"]["malformed_keys"] = len(skipped)
         if "store" in parts:
             out["store"] = {"plugin": self.plugin_id, "takeover": bool(self.store_cfg.get("takeover_store", True)),
                             "cached": self.store._cache is not None}
@@ -800,7 +834,7 @@ class KiraOpsPlugin(BasePlugin):
         decision = self.engine.evaluate(sid, f"{domain}.{act}", kind="read")
         if not decision.allowed:
             return self._deny("ops_read", domain, act, sid, self._uid(event), decision.reason)
-        params = dict(args or {})
+        params = dict(args) if isinstance(args, dict) else {}
         if target:
             params.setdefault(TARGET_ALIASES.get(domain, "target"), target)
         if keyword:
@@ -1081,10 +1115,7 @@ class KiraOpsPlugin(BasePlugin):
         plugins = pm.list_plugins() if pm else []
         sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
         mcp = getattr(getattr(self.ctx, "message_processor", None), "mcp_manager", None)
-        try:
-            sessions = self.ctx.session_mgr.get_session_info() or []
-        except Exception:
-            sessions = []
+        sessions, _skipped = self.session_inventory()
         provs = getattr(self.ctx, "provider_mgr", None)
         return {
             "ok": True,

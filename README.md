@@ -143,6 +143,21 @@ A：回滚只需要 `id`（`ops_action(domain=backup, action=restore, target=<id
 写动作的返回里也会带 `回滚点: backups/<id>`；文件都在
 `data/plugin_data/kira_ops/backups/<id>/`，路径可以省下来不占上下文。
 
+**Q：`read_file` 读不了我的配置文件？**
+A：故意的。它只读**日志文件**（`*.log` / `log.log*`）——曾经它能读 `data/` 下任意文件，
+于是「读取打码」形同虚设（密钥、聊天记忆都能被读进模型）。要看配置用 `ops_read(domain=config)`，
+看插件配置用 `plugin.config_get`，看技能正文用 `skill.content`。
+
+**Q：权限里说的"读取打码"可靠吗？**
+A：可靠，而且是**内置底线**：`api_key / authorization / bearer / cookie / secret / password /
+credential / token / private_key` 这些字段名永远打码，就算把面板里的关键词表清空也照样生效。
+
+**Q：`session.list` 报 `malformed_keys` 是怎么回事？**
+A：说明 `data/memory/chat_memory.json` 里有格式不对的会话键（1.0.0 可能写进去过）。
+它会让**框架自己的会话枚举**（含内置 session_tools 插件）报 `IndexError`。
+本插件会给容错列表 + 报出脏键，按提示删掉即可修复：
+`ops_action(domain=session, action=delete, target=<那个键>)`。
+
 **Q：工具返回的是 JSON 吗？**
 A：是。工具返回 `Payload`（dict 子类），框架把它字符串化时输出**紧凑 JSON**
 （`{"ok":true,...}`）——比 Python dict 的 repr 更短，而且是合法 JSON。
@@ -192,14 +207,14 @@ await self.ctx.emit_custom_event("kira_ops.register_capability", {"class": MyCap
 `name` 合法且未被占用、`ACTIONS` 非空且每项是 `(kind, dangerous, description)`、`kind ∈ {read, write}`。
 注册后即可用 `ops_read(domain="mycap", action="ping")`，并自动受权限引擎与审计约束。
 
-### 自测（共 **91** 项，全部离线可跑）
+### 自测（共 **99** 项，全部离线可跑）
 
 | 套件 | 项数 | 覆盖 |
 | --- | --- | --- |
 | `tests/test_kira_ops.py` | 21 | 权限引擎全链路、打码与写保护、确认令牌、备份快照/冲突/清理、导入冒烟、12 域注册表、`limit`/日志截断/brief 裁剪/能力名校验 |
 | `tests/test_live_ops.py` | 14 | 桩上下文驱动 ops_status / ops_read 六域 / ops_config 拒密钥 / 高危令牌与会话绑定 / ops_panic / 审计落盘 / 商店搜索 |
 | `tests/test_live_ops2.py` | 16 | provider 五条路径、persona 三条、mcp 三条、config 写入、agent 策略路径守卫、control 开关与令牌门 |
-| `tests/test_integration_real.py` | 40 | **真实框架对象**加载插件并逐域驱动：12 域全部只读动作 + 更新后子模块必须是新代码 + 恶意压缩包必须被拒 + 全部修复点的反向断言 |
+| `tests/test_integration_real.py` | 48 | **真实框架对象**加载插件并逐域驱动：12 域全部只读动作 + 更新后子模块必须是新代码 + 恶意压缩包必须被拒 + 全部修复点的反向断言 |
 | `tests/validate_schema.py` | — | schema 与 `core_version` 校验 |
 
 ```bash

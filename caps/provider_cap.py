@@ -108,7 +108,7 @@ class ProviderCap(Capability):
                 if hasattr(remote, "__await__"):
                     remote = await remote
             except Exception as exc:
-                return fail(f"fetch_remote_models failed: {exc}")
+                return fail(f"fetch_remote_models failed: {exc!r}")
             ids = []
             for m in remote or []:
                 if isinstance(m, dict):
@@ -215,6 +215,6 @@ class ProviderCap(Capability):
             try:
                 pm.set_provider(pid, cur)
             except Exception as exc:
-                return fail(f"provider config saved but re-instantiate failed: {exc}")
+                return fail(f"provider config saved but re-instantiate failed: {exc!r}")
             return ok(provider_id=pid, applied=sorted(str(k) for k in cfg.keys()))
         return fail(f"unknown write action '{action}'")

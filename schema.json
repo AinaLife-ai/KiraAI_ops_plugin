@@ -132,14 +132,14 @@
       "read_mask": {
         "type": "list",
         "name": "读取打码字段关键词",
-        "default": ["api_key", "access_token", "secret", "password", "credential", "token", "private_key"],
-        "hint": "读取配置时，字段名含这些关键词则打码"
+        "default": ["api_key", "access_token", "secret", "password", "credential", "token", "private_key", "authorization", "bearer", "cookie"],
+        "hint": "读取配置时字段名含这些关键词即打码；另有 authorization/bearer/cookie/api_key 等为内置底线，删不掉"
       },
       "write_deny": {
         "type": "list",
         "name": "禁止写入字段关键词",
-        "default": ["api_key", "access_token", "secret", "password", "credential", "private_key"],
-        "hint": "任何域（含 agent 策略）都不能修改含这些关键词的字段"
+        "default": ["api_key", "access_token", "secret", "password", "credential", "private_key", "authorization", "bearer", "cookie"],
+        "hint": "任何域（含 agent 策略）都不能修改含这些关键词的字段；内置底线同上"
       },
       "write_allow": {
         "type": "list",

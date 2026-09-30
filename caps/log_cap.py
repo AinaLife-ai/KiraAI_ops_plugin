@@ -1,12 +1,22 @@
-"""Log domain: recent logger output and framework log files."""
+"""Log domain: recent logger output and framework log files.
+
+``read_file`` is deliberately restricted to *log* files. It used to accept any
+path under ``data/``, which turned it into an unmasked arbitrary-read: a reader
+could pull ``config/system_config.json`` (plaintext API keys) or
+``memory/chat_memory.json`` (every conversation) straight into the model
+context, bypassing the read mask that ``config.get`` applies.
+"""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from core.utils.path_utils import get_data_path, get_root_path
 
-from . import Capability, fail, ok, register
+from . import Capability, fail, ok, register, to_int
+
+LOG_FILE_RE = re.compile(r"(^log\.log|.*\.log)(\.\d+)?$", re.IGNORECASE)
 
 # A single log record can be a multi-kilobyte JSON blob (tool results, raw
 # model payloads), so every message is clipped before it reaches the model -
@@ -56,7 +66,7 @@ class LogCap(Capability):
                 cached = self._cache()
             except Exception as exc:
                 return fail(f"failed to read log cache: {exc}")
-            limit = max(1, min(int(params.get("limit") or DEFAULT_TAIL), MAX_TAIL))
+            limit = to_int(params.get("limit"), DEFAULT_TAIL, 1, MAX_TAIL)
             rows = cached[-limit:]
             return ok(count=len(rows), items=[_row(r) for r in rows])
         if action == "search":
@@ -67,7 +77,7 @@ class LogCap(Capability):
                 cached = self._cache()
             except Exception as exc:
                 return fail(f"failed to read log cache: {exc}")
-            limit = max(1, min(int(params.get("limit") or DEFAULT_TAIL), MAX_TAIL))
+            limit = to_int(params.get("limit"), DEFAULT_TAIL, 1, MAX_TAIL)
             hits = [
                 r for r in cached
                 if keyword in str(r.get("message", "")).lower()
@@ -101,6 +111,7 @@ class LogCap(Capability):
                       root=str(get_root_path()))
         if action == "read_file":
             data_dir = get_data_path()
+            root = data_dir.resolve()
             raw = str(params.get("path") or "").strip()
             if not raw:
                 return fail("path is required (relative to data/, e.g. logs/xxx.log)")
@@ -108,16 +119,20 @@ class LogCap(Capability):
             if candidate.is_absolute():
                 return fail("only paths under data/ are allowed")
             target = (data_dir / candidate).resolve()
-            if not str(target).startswith(str(data_dir.resolve())):
+            if not str(target).startswith(str(root)):
                 return fail("path escapes data/")
             if not target.is_file():
                 return fail(f"file not found: {raw}")
+            # log files only - see the module docstring.
+            if not LOG_FILE_RE.match(target.name):
+                return fail(
+                    "only log files can be read here (name must match *.log or log.log*); "
+                    "use config.get / plugin.info / skill.content for other content")
+            allowed, why = self.plugin.engine.check_path("read", str(target))
+            if not allowed:
+                return fail(why)
             text = target.read_text(encoding="utf-8", errors="replace")
-            try:
-                limit = int(params.get("limit") or 8000)
-            except (TypeError, ValueError):
-                limit = 8000
-            limit = max(MIN_FILE_READ, min(limit, MAX_FILE_READ))
+            limit = to_int(params.get("limit"), 8000, MIN_FILE_READ, MAX_FILE_READ)
             return ok(file=raw, tail=text[-limit:], truncated=len(text) > limit,
                       size=len(text), limit=limit)
         return fail(f"unknown read action '{action}'")

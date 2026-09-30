@@ -52,7 +52,7 @@ from core.plugin import PluginManager  # noqa: E402
 from core.plugin.plugin_context import PluginContext  # noqa: E402
 from core.provider import ProviderManager  # noqa: E402
 from core.statistics import Statistics  # noqa: E402
-from core.utils.path_utils import get_data_path  # noqa: E402
+from core.utils.path_utils import get_config_path, get_data_path  # noqa: E402
 
 FAILED = []
 PASSED = []
@@ -285,9 +285,10 @@ def main():
     # ---------------------------------------------------------------- M1 phantom session
     def m1():
         ghost = f"qq:gm:ghost-{uuid.uuid4().hex[:8]}"
-        before = len(ctx.session_mgr.get_session_info() or [])
+        store = ctx.session_mgr.chat_memory
+        before = len(store)
         r = run(inst.ops_read(ev, "session", "info", target=ghost))
-        after = len(ctx.session_mgr.get_session_info() or [])
+        after = len(store)
         _assert(not r.get("ok"), r)
         _assert(before == after, f"session count {before} -> {after}")
     check("M1 session.info never creates the session", m1)
@@ -476,6 +477,159 @@ def main():
         finally:
             run(inst.ops_action(ev, "mcp", "delete", args={"server_id": sid}))
     check("L2 mcp.tool_toggle fails cleanly on an unknown tool", l2)
+    # ---------------------------------------------------------------- security
+    def read_file_scope():
+        """read_file is a *log* reader: it must not become an unmasked arbitrary read."""
+        data = get_data_path()
+        cfg_file = get_config_path() / "system_config.json"
+        raw = json.loads(cfg_file.read_text(encoding="utf-8"))
+        raw.setdefault("providers", {})["canary_prov"] = {
+            "format": "OpenAI", "name": "Canary",
+            "provider_config": {"api_key": "sk-CANARY-DO-NOT-LEAK"},
+            "model_config": {"llm": {"m": {"model_id": "m"}}},
+        }
+        cfg_file.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        blocked = run(inst.ops_read(ev, "log", "read_file",
+                                    args={"path": "config/system_config.json"}))
+        _assert(not blocked.get("ok"), blocked)
+        _assert("sk-CANARY-DO-NOT-LEAK" not in json.dumps(blocked), blocked)
+
+        ctx.session_mgr.write_memory(ev.sid, [[{"role": "user", "content": "chat-canary"}]])
+        mem = run(inst.ops_read(ev, "log", "read_file",
+                                args={"path": "memory/chat_memory.json"}))
+        _assert(not mem.get("ok"), mem)
+        _assert("chat-canary" not in json.dumps(mem), mem)
+
+        probe = data / "kira_ops_probe.log"
+        probe.write_text("log-line-1\nlog-line-2\n", encoding="utf-8")
+        try:
+            ok_read = run(inst.ops_read(ev, "log", "read_file", args={"path": "kira_ops_probe.log"}))
+            _assert(ok_read.get("ok"), ok_read)
+            _assert("log-line-1" in ok_read["tail"], ok_read)
+        finally:
+            probe.unlink(missing_ok=True)
+    check("read_file only reads logs (no unmasked config/memory)", read_file_scope)
+
+    def mask_floor():
+        from plugins.kira_ops.core.redact import ALWAYS_MASK, key_matches, with_floor
+        for key in ("Authorization", "Bearer", "Cookie", "api_key", "token"):
+            _assert(key_matches(key, with_floor([])), f"{key} is not masked")
+        _assert(len(ALWAYS_MASK) >= 8)
+
+        srv = ctx.message_processor.mcp_manager.add_or_update_server_from_config(
+            "canary_srv", "probe", {"type": "sse", "url": "https://x/sse",
+                                    "headers": {"Authorization": "Bearer sk-MCP-CANARY",
+                                                "X-Api-Key": "sk-XKEY-CANARY"}})
+        try:
+            info = run(inst.ops_read(ev, "mcp", "info", args={"server_id": srv.id}))
+            blob = json.dumps(info, ensure_ascii=False)
+            _assert("sk-MCP-CANARY" not in blob, blob[:200])
+            _assert("sk-XKEY-CANARY" not in blob, blob[:200])
+        finally:
+            run(ctx.message_processor.mcp_manager.delete_server(srv.id))
+    check("mask floor hides Authorization/Bearer/Cookie", mask_floor)
+
+    # ---------------------------------------------------------------- consistency
+    def snapshot_uniqueness():
+        from plugins.kira_ops.core.backup import BackupManager
+        bm = BackupManager(get_data_path() / "plugin_data" / "kira_ops", {"keep_last": 50})
+        target = get_config_path() / "system_config.json"
+
+        async def race():
+            return await asyncio.gather(*[
+                asyncio.to_thread(bm.snapshot, [target], "race_probe", "probe")
+                for _ in range(5)])
+
+        snaps = loop.run_until_complete(race())
+        ids = [s.get("id") for s in snaps]
+        _assert(len(set(ids)) == len(ids), f"snapshots merged: {ids}")
+        for snap in snaps:
+            meta = snap.get("path")
+            _assert(meta, snap)
+    check("concurrent snapshots never share a folder", snapshot_uniqueness)
+
+    def audit_args_capped():
+        rows = inst.audit.tail(5)
+        for row in rows:
+            size = len(json.dumps(row, ensure_ascii=False))
+            _assert(size < 6000, f"audit row is {size} chars")
+    check("audit rows are size-capped", audit_args_capped)
+
+    def malformed_args():
+        bad = run(inst.ops_read(ev, "log", "tail", limit="abc"))
+        _assert(bad.get("ok"), bad)              # falls back to the default limit
+        bad2 = run(inst.ops_action(ev, "session", "title", target=ev.sid, args="oops"))
+        _assert(bad2.get("ok") or bad2.get("error"), bad2)
+        bad3 = run(inst.ops_read(ev, "config", "get", args=["a", "b"]))
+        _assert(bad3.get("ok"), bad3)            # non-dict args are ignored, not fatal
+    check("malformed model arguments never raise", malformed_args)
+
+    def session_id_validation():
+        """A junk session id used to poison chat_memory and break the framework."""
+        store = ctx.session_mgr.chat_memory
+        before = set(store)
+        r = run(inst.ops_action(ev, "session", "title", target="x",
+                                args={"session_id": "x", "title": "boom"}))
+        _assert(not r.get("ok"), r)
+        for action in ("caps", "memory_clear"):
+            out = run(inst.ops_action(ev, "session", action, target="bad-key",
+                                      args={"session_id": "bad-key"}))
+            _assert(not out.get("ok"), out)
+        _assert(set(store) == before, f"session store changed: {set(store) ^ before}")
+    check("malformed session ids are refused (no chat_memory poisoning)",
+          session_id_validation)
+
+    def session_inventory_tolerates_junk():
+        """Even with a poisoned store, the session domain must keep working."""
+        store = ctx.session_mgr.chat_memory
+        settings = dict(inst.cfg)
+        settings["risk"] = dict(settings.get("risk") or {}, level="dangerous",
+                                high_risk_sessions=[ev.sid])
+        try:
+            # repair whatever an earlier run (or a 1.0.0 deployment) left behind
+            inst.engine.apply_settings(settings)
+            for key in [k for k in list(store) if len(str(k).split(":")) < 3]:
+                out = run(inst.ops_action(ev, "session", "delete", target=key))
+                if out.get("need_confirm"):
+                    out = run(inst.ops_confirm(ev, out["token"]))
+                _assert(out.get("ok"), out)
+            _assert(all(len(str(k).split(":")) >= 3 for k in store),
+                    f"junk keys remain: {[k for k in store if len(str(k).split(':')) < 3]}")
+            _assert(ctx.session_mgr.get_session_info() is not None,
+                    "the framework enumerator should work again after the repair")
+
+            store["junk_key"] = {"title": "", "description": "", "timestamp": None, "memory": []}
+            broken = False
+            try:
+                ctx.session_mgr.get_session_info()
+            except Exception:
+                broken = True
+            _assert(broken, "expected the framework enumerator to raise on a junk key")
+
+            listed = run(inst.ops_read(ev, "session", "list"))
+            _assert(listed.get("ok"), listed)
+            _assert("junk_key" in (listed.get("malformed_keys") or []), listed)
+            status = run(inst.ops_status(ev, include="sessions"))
+            _assert(status.get("ok"), status)
+
+            removed = run(inst.ops_action(ev, "session", "delete", target="junk_key"))
+            if removed.get("need_confirm"):
+                removed = run(inst.ops_confirm(ev, removed["token"]))
+            _assert(removed.get("ok"), removed)
+            _assert("junk_key" not in ctx.session_mgr.chat_memory)
+            _assert(ctx.session_mgr.get_session_info() is not None)
+        finally:
+            inst.engine.apply_settings(inst.cfg)
+            ctx.session_mgr.chat_memory.pop("junk_key", None)
+    check("malformed chat_memory keys degrade gracefully and can be repaired",
+          session_inventory_tolerates_junk)
+
+    def read_file_never_leaks():
+        blocked = run(inst.ops_read(ev, "log", "read_file",
+                                    args={"path": "config/plugins/kira_ops.json"}))
+        _assert(not blocked.get("ok"), blocked)
+    check("read_file refuses non-log files under data/", read_file_never_leaks)
 
     loop.close()
     print()
