@@ -1,0 +1,16 @@
+{
+  "plugin_id": "kira_ops",
+  "display_name": "Kira Ops Console",
+  "version": "1.0.0",
+  "author": "AiriLife-ai",
+  "core_version": ">=2.33.1",
+  "repo": "https://github.com/AiriLife-ai/kira_ops",
+  "description": "KiraAI runtime control console: a small set of merged LLM tools to inspect and hot-manage plugins, skills, providers, MCP, sessions, personas, configs, logs and the plugin store - with whitelist/blacklist access control, risk levels, automatic backups, an audit trail and a full WebUI panel.",
+  "tags": ["management", "admin", "ops", "store", "plugin"],
+  "locales": {
+    "zh": {
+      "display_name": "Kira 运行自控台",
+      "description": "给 KiraAI 的运行自控台：用合并后的少量工具统一查看与热管理插件、技能、Provider、MCP、会话、人设、配置、日志与插件商店；带白/黑名单访问控制、风险分级、自动备份、审计留痕与完整 WebUI 面板。"
+    }
+  }
+}

@@ -1,0 +1,1023 @@
+"""Kira Ops Console - runtime control console for KiraAI (v1.0.0).
+
+A small, merged tool surface (ops_status / ops_read / ops_config /
+ops_action / ops_store / ops_confirm / ops_panic) backed by:
+
+  * a permission engine with three knobs (allow list empty = everyone,
+    blacklist first, read-only list) plus a risk ladder and a mandatory
+    high-risk session list;
+  * automatic pre-write backups with retention and restore;
+  * a JSONL audit trail;
+  * a capability registry (caps/) that keeps the tool surface constant
+    while domains grow;
+  * a WebUI panel where every setting is hot-editable and takes effect
+    without a restart;
+  * mutual exclusion with the standalone plugin store plugin.
+
+All paths are resolved from the framework (get_data_path / get_root_path);
+nothing personal is hard-coded, so the plugin is drop-in for any KiraAI
+deployment.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from pathlib import Path
+
+from core.plugin import BasePlugin, PageMenu, PluginPage, Priority, logger, on, register
+from core.chat.message_utils import KiraMessageBatchEvent
+from core.provider import LLMRequest
+from core.utils.path_utils import get_config_path, get_data_path
+
+from . import caps as caps_pkg
+from .caps import load_all
+from .core.audit import AuditLog
+from .core.backup import BackupManager
+from .core.confirm import ConfirmPool
+from .core.permission import PermissionEngine
+from .store import StoreClient, PLUGIN_ID_RE
+from .store.installer import install_plugin_dir, install_skill_dir
+from core.prompt_manager import Prompt
+
+# Plugins whose functionality kira_ops fully absorbs. When they are enabled,
+# kira_ops disables them (never uninstalls) so nothing double-registers.
+CONFLICT_PLUGINS = ("plugin_store_search",)
+
+# target alias -> the id field each capability expects
+TARGET_ALIASES = {
+    "plugin": "plugin_id",
+    "store": "plugin_id",
+    "skill": "name",
+    "provider": "provider_id",
+    "mcp": "server_id",
+    "session": "session_id",
+    "persona": "persona_id",
+    "backup": "backup_id",
+}
+
+
+class KiraOpsPlugin(BasePlugin):
+    plugin_id = "kira_ops"
+
+    def __init__(self, ctx, cfg: dict):
+        super().__init__(ctx, cfg)
+        self.cfg = cfg or {}
+        self.refresh_settings(self.cfg)
+        self.data_dir = self._resolve_data_dir()
+        self.engine = PermissionEngine(self.cfg)
+        self.backups = BackupManager(self.data_dir, self.backup_cfg)
+        self.audit = AuditLog(self.data_dir, self.audit_cfg)
+        self.confirm = ConfirmPool(ttl=int(self.risk.get("confirm_ttl") or 300))
+        self.store = StoreClient(self.store_cfg)
+        self.tasks: set = set()
+        self.warnings: list = []
+
+        load_all()
+        self.caps = {name: cls(self) for name, cls in caps_pkg.REGISTRY.items()}
+
+    # ------------------------------------------------------------------
+    # config plumbing
+    # ------------------------------------------------------------------
+
+    def refresh_settings(self, cfg: dict) -> None:
+        self.master = (cfg or {}).get("master") or {}
+        self.access = (cfg or {}).get("access") or {}
+        self.risk = (cfg or {}).get("risk") or {}
+        self.control = (cfg or {}).get("control") or {}
+        self.protected = (cfg or {}).get("protected") or {}
+        self.backup_cfg = (cfg or {}).get("backup") or {}
+        self.audit_cfg = (cfg or {}).get("audit") or {}
+        self.store_cfg = (cfg or {}).get("store") or {}
+
+    def _resolve_data_dir(self) -> Path:
+        try:
+            d = self.ctx.get_plugin_data_dir()
+        except Exception:
+            d = None
+        if not d:
+            d = get_data_path() / "plugin_data" / self.plugin_id
+        d = Path(d)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @property
+    def kira_config(self):
+        return self.ctx.config
+
+    @property
+    def lifecycle(self):
+        """Best-effort lookup of the running KiraLifecycle instance."""
+        if getattr(self, "_lifecycle_cache", None) is not None:
+            return self._lifecycle_cache
+        found = None
+        pm = getattr(self.ctx, "plugin_mgr", None)
+        app = getattr(pm, "_web_app", None)
+        if app is not None:
+            found = getattr(app.state, "lifecycle", None)
+        if found is None:
+            found = self._scan_tasks_for_lifecycle()
+        if found is not None:
+            self._lifecycle_cache = found
+        return found
+
+    @staticmethod
+    def _scan_tasks_for_lifecycle():
+        try:
+            for task in asyncio.all_tasks():
+                coro = task.get_coro() if hasattr(task, "get_coro") else None
+                frame = getattr(coro, "cr_frame", None)
+                hops = 0
+                while frame is not None and hops < 60:
+                    obj = frame.f_locals.get("self")
+                    if obj is not None and obj.__class__.__name__ == "KiraLifecycle":
+                        return obj
+                    frame = frame.f_back
+                    hops += 1
+        except Exception:
+            pass
+        try:
+            import gc
+            from core.lifecycle import KiraLifecycle
+            for obj in gc.get_objects():
+                if isinstance(obj, KiraLifecycle):
+                    return obj
+        except Exception:
+            pass
+        return None
+
+    def log(self, message: str):
+        logger.info(f"[kira_ops] {message}")
+
+    def mask(self, data):
+        return self.engine.mask_for_read(data)
+
+    @staticmethod
+    def deep_merge(base: dict, patch: dict) -> dict:
+        out = dict(base or {})
+        for key, value in (patch or {}).items():
+            if isinstance(value, dict) and isinstance(out.get(key), dict):
+                out[key] = KiraOpsPlugin.deep_merge(out[key], value)
+            else:
+                out[key] = value
+        return out
+
+    def validate_agent_policy_patch(self, patch: dict) -> list:
+        """Guard writes to the agent plugin's policy (paths + fields)."""
+        from .core.redact import flatten
+
+        violations = []
+        if isinstance(patch, dict):
+            for section in ("file_access", "exec_access"):
+                sec = patch.get(section) or {}
+                if not isinstance(sec, dict):
+                    continue
+                for key, _value in sec.items():
+                    good, why = self.engine.check_field_write(key, restrict=False)
+                    if not good:
+                        violations.append(f"{section}.{key}: {why}")
+                for path_key in ("extra_read_paths", "extra_write_paths"):
+                    for p in sec.get(path_key) or []:
+                        ok_read = self.engine.check_path("read", p)
+                        ok_write = self.engine.check_path("write", p)
+                        if not ok_read[0]:
+                            violations.append(f"{section}.{path_key} {p}: {ok_read[1]}")
+                        if not ok_write[0]:
+                            violations.append(f"{section}.{path_key} {p}: {ok_write[1]}")
+            for path, key, _v in flatten(patch):
+                good, why = self.engine.check_field_write(key, restrict=False)
+                if not good:
+                    violations.append(f"{path}: {why}")
+        return sorted(set(violations))
+
+    # ------------------------------------------------------------------
+    # store operations (shared with caps and tools)
+    # ------------------------------------------------------------------
+
+    async def install_from_store(self, plugin_id: str, force: bool = False) -> dict:
+        if not PLUGIN_ID_RE.match(plugin_id or ""):
+            return {"ok": False, "error": f"illegal plugin id '{plugin_id}'"}
+        pm = getattr(self.ctx, "plugin_mgr", None)
+        if not pm:
+            return {"ok": False, "error": "plugin manager is unavailable"}
+        if plugin_id == self.plugin_id:
+            return {"ok": False, "error": "kira_ops refuses to overwrite itself"}
+        try:
+            plugins = await self.store.fetch()
+        except Exception as exc:
+            return {"ok": False, "error": f"store fetch failed: {exc}"}
+        target = self.store.find_plugin(plugins, plugin_id)
+        if not target:
+            return {"ok": False, "error": f"plugin '{plugin_id}' not found in the store"}
+
+        repo = target.get("repo") or target.get("repository") or ""
+        direct = (target.get("download_url") or target.get("zip_url")
+                  or target.get("archive_url") or "")
+        if not repo and not direct:
+            return {"ok": False, "error": f"plugin '{plugin_id}' has no repo or download url"}
+        if pm.has_plugin(plugin_id) and not force:
+            return {"ok": False,
+                    "error": f"plugin '{plugin_id}' already exists; pass force=true to overwrite"}
+
+        workspace = StoreClient.temp_workspace()
+        zip_path = workspace / "plugin.zip"
+        staging = workspace / "extract"
+        try:
+            if repo:
+                parsed = StoreClient.parse_repo(repo)
+                if not parsed:
+                    return {"ok": False, "error": f"cannot parse repo: {repo}"}
+                source = await self.store.download_github_archive(parsed[0], parsed[1], zip_path)
+            else:
+                why = StoreClient.validate_direct_url(direct)
+                if why:
+                    return {"ok": False, "error": f"direct download blocked: {why}"}
+                await self.store.download(direct, zip_path)
+                source = direct
+
+            manifest, root = StoreClient.extract_zip(zip_path, staging)
+            if manifest is None:
+                return {"ok": False, "error": "no manifest.json found inside the archive"}
+            install_id = str(manifest.get("plugin_id") or manifest.get("id") or plugin_id).strip()
+            if install_id != plugin_id and not force:
+                return {"ok": False,
+                        "error": f"store id '{plugin_id}' != manifest id '{install_id}' (force=true to override)"}
+            if not PLUGIN_ID_RE.match(install_id):
+                return {"ok": False, "error": f"illegal plugin id '{install_id}'"}
+
+            snapshot = []
+            for f in (get_config_path() / "plugins" / f"{install_id}.json",
+                      get_config_path() / "plugins.json"):
+                if Path(f).exists():
+                    snapshot.append(f)
+            backup = self.backups.snapshot(snapshot, f"store_install_{install_id}", "store install")
+
+            await install_plugin_dir(pm, root, install_id)
+            if backup.get("id"):
+                self.backups.mark_applied(backup["id"])
+            info = pm.get_plugin_info(install_id)
+            return {"ok": True,
+                    "plugin_id": install_id,
+                    "version": (getattr(info, "version", "") if info else manifest.get("version") or ""),
+                    "status": (getattr(info, "status", "") if info else "unknown"),
+                    "source": source,
+                    "backup": backup}
+        except Exception as exc:
+            logger.exception(f"[kira_ops] install failed: {exc}")
+            return {"ok": False, "error": f"install failed: {exc}"}
+        finally:
+            try:
+                import shutil
+                shutil.rmtree(workspace, ignore_errors=True)
+            except Exception:
+                pass
+
+    async def store_search(self, keyword: str = "", author: str = "",
+                           tag: str = "", limit: int = 0) -> dict:
+        """Search the store listing (shared by ops_store and the store cap)."""
+        try:
+            plugins = await self.store.fetch()
+        except Exception as exc:
+            return {"ok": False, "error": f"store fetch failed: {exc}"}
+        needle = (keyword or "").strip().lower()
+        items = []
+        for p in plugins or []:
+            if not isinstance(p, dict):
+                continue
+            pid = str(p.get("plugin_id") or p.get("id") or "")
+            name = str(p.get("display_name") or p.get("name") or pid)
+            desc = str(p.get("description") or "")
+            author_v = str(p.get("author") or "")
+            tags = p.get("tags") or []
+            hay = f"{pid} {name} {desc} {author_v} {' '.join(map(str, tags))}".lower()
+            if needle and needle not in hay:
+                continue
+            if author and author.lower() not in author_v.lower():
+                continue
+            if tag and tag.lower() not in [str(t).lower() for t in tags]:
+                continue
+            items.append({
+                "plugin_id": pid, "name": name, "version": str(p.get("version") or ""),
+                "author": author_v, "description": desc[:180],
+                "tags": list(tags)[:6],
+                "downloads": p.get("downloads") or p.get("download_count") or 0,
+                "likes": p.get("likes") or 0,
+            })
+        items.sort(key=lambda x: -(x.get("downloads") or 0))
+        cap = max(1, int(limit or self.store.max_results or 10))
+        return {"ok": True, "count": len(items), "items": items[:cap],
+                "truncated": len(items) > cap}
+
+    async def install_skill_from_url(self, url: str, name: str, overwrite: bool = False) -> dict:
+        skills_root = get_data_path() / "skills"
+        workspace = StoreClient.temp_workspace("kira_ops_skill_")
+        zip_path = workspace / "skill.zip"
+        staging = workspace / "extract"
+        try:
+            if "github.com" in url:
+                parsed = StoreClient.parse_repo(url)
+                if not parsed:
+                    return {"ok": False, "error": f"cannot parse repo: {url}"}
+                await self.store.download_github_archive(parsed[0], parsed[1], zip_path)
+            else:
+                why = StoreClient.validate_direct_url(url)
+                if why:
+                    return {"ok": False, "error": f"download blocked: {why}"}
+                await self.store.download(url, zip_path)
+            _manifest, root = StoreClient.extract_zip(zip_path, staging)
+            if not (root / "SKILL.md").is_file():
+                return {"ok": False, "error": "SKILL.md was not found in the archive"}
+            target = install_skill_dir(skills_root, root, name, overwrite=overwrite)
+            sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
+            if sm:
+                sm.skills_info = sm.scan_skill_dir()
+            return {"ok": True, "name": name, "path": str(target)}
+        except Exception as exc:
+            return {"ok": False, "error": f"skill install failed: {exc}"}
+        finally:
+            try:
+                import shutil
+                shutil.rmtree(workspace, ignore_errors=True)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # lifecycle
+    # ------------------------------------------------------------------
+
+    async def initialize(self):
+        if not bool(self.master.get("enabled", True)):
+            self.log("disabled in settings; tool surface not registered")
+            return
+        if self.backups.cleanup_on_start:
+            stats = self.backups.cleanup()
+            self.audit.cleanup()
+            self.log(f"startup cleanup: backups removed={stats.get('removed', 0)}")
+        self._check_mandatory_settings()
+        if bool(self.store_cfg.get("takeover_store", True)):
+            await self._takeover_store()
+        self.log("ready: tools + panel registered")
+
+    async def terminate(self):
+        for task in list(self.tasks):
+            if not task.done():
+                task.cancel()
+        self.tasks.clear()
+        self.confirm.clear()
+
+    def _check_mandatory_settings(self):
+        self.warnings = []
+        if not (self.risk.get("high_risk_sessions") or []):
+            self.warnings.append(
+                "high_risk_sessions 为空：当前没有任何会话可以执行高危动作（这是安全默认，不是故障）")
+        if not self.protected.get("persona_write", False):
+            self.warnings.append("人设当前为只读（protected.persona_write=false）")
+        for w in self.warnings:
+            logger.warning(f"[kira_ops] {w}")
+
+    async def _takeover_store(self):
+        conflicts = self.conflicts()
+        if not conflicts:
+            return
+        pm = getattr(self.ctx, "plugin_mgr", None)
+        for pid in conflicts:
+            try:
+                await pm.set_plugin_enabled(pid, False)
+                self.log(f"takeover: disabled conflicting plugin '{pid}'")
+            except Exception as exc:
+                logger.error(f"[kira_ops] failed to disable conflicting plugin {pid}: {exc}")
+
+    def conflicts(self) -> list:
+        pm = getattr(self.ctx, "plugin_mgr", None)
+        if not pm or not hasattr(pm, "has_plugin"):
+            return []
+        return [pid for pid in CONFLICT_PLUGINS
+                if pm.has_plugin(pid) and pm.is_plugin_enabled(pid)]
+
+    # ------------------------------------------------------------------
+    # anomaly awareness (dynamic chat_env note, in-memory only, no I/O)
+    # ------------------------------------------------------------------
+
+    @on.llm_request(priority=Priority.LOW)
+    async def note_anomaly(self, event, req: LLMRequest, tag_set, *_):
+        """Append one short line to chat_env only in abnormal states.
+
+        Keeps the system prefix untouched (chat_env is a dynamic prompt that
+        the framework relocates to the latest user message), reads nothing
+        from disk and stays silent during normal operation.
+        """
+        notes = []
+        if bool(self.master.get("enabled", True)) and bool(self.master.get("panic_lock", False)):
+            notes.append("控制台处于全锁（只读）状态：写操作已被紧急刹车")
+        try:
+            conflicts = self.conflicts()
+        except Exception:
+            conflicts = []
+        if conflicts:
+            notes.append("检测到商店插件冲突：" + ",".join(conflicts))
+        if not notes:
+            return
+        text = "\n[kira_ops] " + "；".join(notes)
+        for p in req.system_prompt:
+            if getattr(p, "name", "") == "chat_env":
+                p.content += text
+                return
+        req.system_prompt.append(Prompt(text.strip(), name="chat_env", source="kira_ops"))
+
+    # ------------------------------------------------------------------
+    # request context helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sid(event) -> str:
+        sid = getattr(event, "sid", None)
+        if sid:
+            return str(sid)
+        session = getattr(event, "session", None)
+        if session is not None:
+            return str(getattr(session, "sid", "") or session)
+        return ""
+
+    @staticmethod
+    def _uid(event) -> str:
+        try:
+            messages = getattr(event, "messages", None) or []
+            if messages:
+                sender = getattr(messages[-1], "sender", None)
+                if sender is not None:
+                    return str(getattr(sender, "user_id", "") or "")
+            session = getattr(event, "session", None)
+            if session is not None and getattr(session, "session_type", "") == "dm":
+                return str(getattr(session, "session_id", "") or "")
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _normalize_params(cap_name: str, params: dict, target: str = "") -> dict:
+        params = dict(params or {})
+        if target:
+            params.setdefault(TARGET_ALIASES.get(cap_name, "target"), target)
+            params.setdefault("target", target)
+        return params
+
+    def _confirm_needed(self, decision, payload: dict, sid: str, uid: str) -> dict:
+        """Stash a high-risk request and hand back a one-shot confirm token."""
+        record = self.confirm.issue(payload, sid=sid, uid=uid)
+        self.audit.write(kind="write", tool="ops_confirm", domain=payload.get("cap", ""),
+                         action=payload.get("action", ""), sid=sid, uid=uid,
+                         ok=True, note="confirm token issued (pending user approval)")
+        return {
+            "ok": False,
+            "need_confirm": True,
+            "token": record["token"],
+            "expires_in": self.confirm.ttl,
+            "preview": {
+                "cap": payload.get("cap"),
+                "action": payload.get("action"),
+                "params": self.mask(payload.get("params") or {}),
+            },
+            "hint": "高危动作：请在 "
+                    f"{self.confirm.ttl} 秒内调用 ops_confirm(token=...) 确认执行；"
+                    "不确认则自动作废",
+        }
+
+    def _cap(self, domain: str):
+        """Return the live capability *instance* for a domain (not the class)."""
+        name = str(domain or "")
+        cap = self.caps.get(name)
+        if cap is not None:
+            return cap
+        # defensive: registry may have gained a domain after __init__
+        load_all()
+        cls = caps_pkg.REGISTRY.get(name)
+        if cls is None:
+            return None
+        cap = cls(self)
+        self.caps[name] = cap
+        return cap
+
+    # ------------------------------------------------------------------
+    # write pipeline
+    # ------------------------------------------------------------------
+
+    async def _execute_write(self, cap, action: str, params: dict, key: str,
+                             sid: str, uid: str, tool: str = "ops_action") -> dict:
+        backup = {}
+        try:
+            files = cap.backup_files(action, params) or []
+            files = [f for f in files if Path(f).is_file()]
+            if files:
+                backup = self.backups.snapshot(files, cap.backup_label(action, params), reason=key)
+        except Exception as exc:
+            logger.warning(f"[kira_ops] snapshot before {key} failed: {exc}")
+
+        started = time.time()
+        try:
+            result = cap.handle_write(action, params)
+            if hasattr(result, "__await__"):
+                result = await result
+        except Exception as exc:
+            logger.exception(f"[kira_ops] {key} failed: {exc}")
+            result = {"ok": False, "error": f"{key} failed: {exc}"}
+        ms = int((time.time() - started) * 1000)
+        if not isinstance(result, dict):
+            result = {"ok": True, "result": result}
+
+        if backup.get("id"):
+            try:
+                self.backups.mark_applied(backup["id"])
+            except Exception:
+                pass
+        if result.get("ok") and backup.get("id"):
+            result["backup"] = backup
+            hint = result.get("hint") or ""
+            rollback = f"回滚点: backups/{backup['id']}"
+            result["hint"] = (hint + " ｜ " + rollback).strip(" ｜")
+
+        self.audit.write(kind="write", tool=tool, domain=cap.name, action=action,
+                         target=str(params.get("target") or params.get("plugin_id")
+                                    or params.get("session_id") or params.get("name") or ""),
+                         sid=sid, uid=uid, args=self.mask(params), ok=bool(result.get("ok")),
+                         error=str(result.get("error") or ""), ms=ms,
+                         backup=str(backup.get("id") or ""))
+        return result
+
+    def _deny(self, tool, cap_name, action, sid, uid, reason):
+        self.audit.write(kind="write", tool=tool, domain=cap_name, action=action,
+                         sid=sid, uid=uid, ok=False, error=reason)
+        return {"ok": False, "error": f"permission denied: {reason}"}
+
+    # ==================================================================
+    # TOOLS
+    # ==================================================================
+
+    @register.tool(
+        "ops_status",
+        "查看 KiraAI 运行总览：插件/技能/Provider/MCP/会话计数、权限档位、告警、备份与审计概况。"
+        "系统体检、自检、看整体状况时调用。",
+        {
+            "type": "object",
+            "properties": {
+                "include": {"type": "string",
+                            "description": "逗号分隔的段落：resources,plugins,providers,mcp,sessions,store,audit,permission（默认 resources,plugins,providers,permission）"},
+                "detail": {"type": "string", "description": "brief（默认）或 full"}
+            },
+            "required": []
+        }
+    )
+    async def ops_status(self, event: KiraMessageBatchEvent, include: str = "", detail: str = "brief"):
+        pm = getattr(self.ctx, "plugin_mgr", None)
+        parts = [p.strip() for p in (include or "resources,plugins,providers,permission").split(",") if p.strip()]
+        out = {"ok": True, "detail": detail}
+        if "resources" in parts:
+            try:
+                import psutil
+                out["resources"] = {
+                    "cpu_percent": psutil.cpu_percent(interval=None),
+                    "memory_percent": psutil.virtual_memory().percent,
+                    "disk_percent": psutil.disk_usage(str(get_data_path())).percent,
+                }
+            except Exception:
+                out["resources"] = {"note": "psutil unavailable"}
+        if "plugins" in parts and pm:
+            plugins = pm.list_plugins()
+            out["plugins"] = {
+                "total": len(plugins),
+                "enabled": sum(1 for p in plugins if pm.is_plugin_enabled(p.plugin_id)),
+                "errors": [p.plugin_id for p in plugins if (p.status or "") in ("error",)],
+                "conflicts": self.conflicts(),
+            }
+        if "skills" in parts:
+            sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
+            out["skills"] = {"total": len(sm.skills_info) if sm else 0,
+                             "enabled": sum(1 for s in (sm.skills_info if sm else []) if s.enabled)}
+        if "providers" in parts:
+            pmgr = getattr(self.ctx, "provider_mgr", None)
+            provs = pmgr.get_all_providers() if pmgr else {}
+            out["providers"] = {"total": len(provs or {})}
+        if "mcp" in parts:
+            mcp = getattr(getattr(self.ctx, "message_processor", None), "mcp_manager", None)
+            out["mcp"] = {"total": len(mcp.servers) if mcp else 0}
+        if "sessions" in parts:
+            try:
+                sessions = self.ctx.session_mgr.get_session_info() or []
+            except Exception:
+                sessions = []
+            out["sessions"] = {"total": len(sessions)}
+        if "store" in parts:
+            out["store"] = {"plugin": self.plugin_id, "takeover": bool(self.store_cfg.get("takeover_store", True)),
+                            "cached": self.store._cache is not None}
+        if "audit" in parts:
+            out["audit"] = {"files": len(self.audit.history(30)),
+                            "pending_confirms": self.confirm.pending_count,
+                            "backups": len(self.backups.list(500))}
+        if "permission" in parts:
+            out["permission"] = self.engine.summary()
+        if self.warnings:
+            out["warnings"] = self.warnings
+        if pm and not pm.is_plugin_enabled("agent"):
+            out.setdefault("notes", []).append("agent 插件未启用：文件/命令能力当前不可用（本插件只托管其策略）")
+        return out
+
+    @register.tool(
+        "ops_read",
+        "只读查看 Kira 各域明细。domain 可选：plugin, skill, provider, mcp, session, persona, config, log, store, backup, agent, control。"
+        "action 常用：list / info / config_get / models / memory_count / content / tail / search / history。",
+        {
+            "type": "object",
+            "properties": {
+                "domain": {"type": "string", "description": "域，见工具描述"},
+                "action": {"type": "string", "description": "动作，缺省为 list"},
+                "target": {"type": "string", "description": "目标对象 ID（插件ID/技能名/会话ID/ProviderID/服务器ID/人设ID/备份ID）"},
+                "keyword": {"type": "string", "description": "关键词过滤/搜索"},
+                "limit": {"type": "integer", "description": "条数上限"},
+                "args": {"type": "object", "description": "附加参数（JSON 对象）"}
+            },
+            "required": ["domain"]
+        }
+    )
+    async def ops_read(self, event: KiraMessageBatchEvent, domain: str, action: str = "list",
+                       target: str = "", keyword: str = "", limit: int = 0, args: dict = None):
+        cap = self._cap(domain)
+        if cap is None:
+            return {"ok": False, "error": f"unknown domain '{domain}'",
+                    "domains": sorted(caps_pkg.REGISTRY.keys())}
+        act = (action or "list").strip()
+        if act not in cap.ACTIONS:
+            return {"ok": False, "error": f"unknown action '{act}' for domain '{domain}'",
+                    "actions": sorted(cap.ACTIONS.keys())}
+        kind = cap.ACTIONS[act][0]
+        if kind != "read":
+            # allow read-kind fallback for write entries used as listing
+            return {"ok": False, "error": f"'{act}' is a write action; use ops_action/ops_config"}
+        sid = self._sid(event)
+        decision = self.engine.evaluate(sid, f"{domain}.{act}", kind="read")
+        if not decision.allowed:
+            return {"ok": False, "error": f"permission denied: {decision.reason}"}
+        params = dict(args or {})
+        if target:
+            params.setdefault(TARGET_ALIASES.get(domain, "target"), target)
+        if keyword:
+            params.setdefault("keyword", keyword)
+        if limit:
+            params.setdefault("limit", limit)
+        try:
+            result = cap.handle_read(act, params)
+            if hasattr(result, "__await__"):
+                result = await result
+        except Exception as exc:
+            logger.exception(f"[kira_ops] read {domain}.{act} failed: {exc}")
+            return {"ok": False, "error": f"{domain}.{act} failed: {exc}"}
+        if not isinstance(result, dict):
+            result = {"ok": True, "result": result}
+        self.audit.write(kind="read", tool="ops_read", domain=domain, action=act,
+                         sid=sid, uid=self._uid(event), ok=bool(result.get("ok")),
+                         error=str(result.get("error") or ""))
+        return result
+
+    @register.tool(
+        "ops_config",
+        "写配置。domain=config 写 KiraAI 系统配置（path+patch）；domain=plugin 写插件配置（target=插件ID）；"
+        "domain=agent 写内置 agent 插件的文件/命令策略。敏感字段与保护路径一律拒绝。",
+        {
+            "type": "object",
+            "properties": {
+                "domain": {"type": "string", "description": "config / plugin / agent"},
+                "target": {"type": "string", "description": "插件ID（domain=plugin 时）"},
+                "path": {"type": "string", "description": "配置路径（domain=config 时，如 bot_config.bot）"},
+                "patch": {"type": "object", "description": "要写入的 JSON 对象"},
+                "confirm": {"type": "string", "description": "高危动作的确认令牌（如返回需要）"}
+            },
+            "required": ["domain", "patch"]
+        }
+    )
+    async def ops_config(self, event: KiraMessageBatchEvent, domain: str, patch: dict,
+                         target: str = "", path: str = "", confirm: str = ""):
+        sid = self._sid(event)
+        uid = self._uid(event)
+        if domain == "config":
+            cap = self._cap("config")
+            params = {"path": path, "patch": patch}
+            key = "config.set"
+            act = "set"
+        elif domain == "plugin":
+            cap = self._cap("plugin")
+            params = {"plugin_id": target, "patch": patch}
+            key = "plugin.config_set"
+            act = "config_set"
+        elif domain == "agent":
+            cap = self._cap("agent")
+            params = {"patch": patch}
+            key = "agent.set"
+            act = "set"
+        else:
+            return {"ok": False, "error": "domain must be config / plugin / agent"}
+
+        decision = self.engine.evaluate(sid, key, kind="write")
+        if not decision.allowed:
+            return self._deny("ops_config", cap.name, act, sid, uid, decision.reason)
+        pre = cap.preflight(act, params)
+        if pre:
+            return self._deny("ops_config", cap.name, act, sid, uid, pre)
+        if decision.need_confirm:
+            if not confirm:
+                return self._confirm_needed(
+                    decision, {"cap": cap.name, "action": act, "params": params, "key": key},
+                    sid, uid)
+            ok_tok, payload = self.confirm.take(confirm, sid, uid)
+            if not ok_tok:
+                return {"ok": False, "error": f"confirm token rejected: {payload}"}
+            params = payload.get("params") or params
+        return await self._execute_write(cap, act, params, key, sid, uid, tool="ops_config")
+
+    @register.tool(
+        "ops_action",
+        "执行 Kira 各域动作（生命周期/写操作）。domain+action 见 describe："
+        "plugin(enable/disable/reload/install/update/uninstall)、skill(refresh/enable/disable/set_scope/remove)、"
+        "provider(add_model/update_model/delete_model/sync)、mcp(add/update/enable/disable/tool_toggle/delete)、"
+        "session(title/caps/memory_clear/delete)、persona(set_active/create/update/delete)、backup(restore)、"
+        "control(restart/shutdown)。高危动作会返回确认令牌，需再调 ops_confirm。",
+        {
+            "type": "object",
+            "properties": {
+                "domain": {"type": "string", "description": "域"},
+                "action": {"type": "string", "description": "动作"},
+                "target": {"type": "string", "description": "目标 ID"},
+                "args": {"type": "object", "description": "附加参数（JSON）"},
+                "confirm": {"type": "string", "description": "确认令牌（如返回需要）"}
+            },
+            "required": ["domain", "action"]
+        }
+    )
+    async def ops_action(self, event: KiraMessageBatchEvent, domain: str, action: str,
+                         target: str = "", args: dict = None, confirm: str = ""):
+        cap = self._cap(domain)
+        if cap is None:
+            return {"ok": False, "error": f"unknown domain '{domain}'",
+                    "domains": sorted(caps_pkg.REGISTRY.keys())}
+        act = (action or "").strip()
+        if act not in cap.ACTIONS:
+            return {"ok": False, "error": f"unknown action '{act}' for domain '{domain}'",
+                    "actions": sorted(cap.ACTIONS.keys())}
+        kind, dangerous, _desc = cap.ACTIONS[act]
+        if kind != "write":
+            return {"ok": False, "error": f"'{act}' is a read action; use ops_read"}
+
+        sid = self._sid(event)
+        uid = self._uid(event)
+        key = (cap.classify(act, args or {}) or f"{domain}.{act}")
+
+        if domain == "control":
+            decision = self.engine.evaluate_control(sid, key)
+        else:
+            decision = self.engine.evaluate(sid, key, kind="write")
+
+        params = self._normalize_params(domain, args or {}, target)
+        if not decision.allowed:
+            return self._deny("ops_action", domain, act, sid, uid, decision.reason)
+
+        pre = cap.preflight(act, params)
+        if pre:
+            return self._deny("ops_action", domain, act, sid, uid, pre)
+
+        if decision.need_confirm:
+            if not confirm:
+                return self._confirm_needed(decision, {"cap": domain, "action": act,
+                                                       "params": params, "key": key}, sid, uid)
+            ok_tok, payload = self.confirm.take(confirm, sid, uid)
+            if not ok_tok:
+                return {"ok": False, "error": f"confirm token rejected: {payload}"}
+            return await self._execute_write(cap, act, payload.get("params") or params, key,
+                                             sid, uid, tool="ops_action")
+        return await self._execute_write(cap, act, params, key, sid, uid, tool="ops_action")
+
+    @register.tool(
+        "ops_store",
+        "插件商店：action=search 搜索插件（可带 keyword/author/tag），action=install/update 安装或更新（高危，需令牌），"
+        "action=sources 查看商店源与缓存状态。",
+        {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "search / install / update / sources"},
+                "keyword": {"type": "string", "description": "搜索关键词"},
+                "author": {"type": "string", "description": "按作者过滤"},
+                "tag": {"type": "string", "description": "按标签过滤"},
+                "plugin_id": {"type": "string", "description": "安装/更新时的插件ID"},
+                "force": {"type": "boolean", "description": "覆盖安装"},
+                "confirm": {"type": "string", "description": "确认令牌（如需）"}
+            },
+            "required": ["action"]
+        }
+    )
+    async def ops_store(self, event: KiraMessageBatchEvent, action: str, keyword: str = "",
+                        author: str = "", tag: str = "", plugin_id: str = "",
+                        force: bool = False, confirm: str = ""):
+        act = (action or "").strip()
+        sid = self._sid(event)
+        uid = self._uid(event)
+        if act == "sources":
+            return {"ok": True, "store_url": self.store.store_url,
+                    "proxy": self.store.proxy or "(auto)", "cache_ttl": self.store.cache_ttl,
+                    "cached": self.store._cache is not None}
+        if act == "search":
+            decision = self.engine.evaluate(sid, "store.search", kind="read")
+            if not decision.allowed:
+                return self._deny("ops_store", "store", "search", sid, uid, decision.reason)
+            return await self.store_search(keyword=keyword, author=author, tag=tag)
+        if act in ("install", "update"):
+            key = f"store.{act}"
+            decision = self.engine.evaluate(sid, key, kind="write")
+            if not decision.allowed:
+                return self._deny("ops_store", "store", act, sid, uid, decision.reason)
+            if decision.need_confirm and not confirm:
+                payload = {"cap": "store", "action": act,
+                           "params": {"plugin_id": plugin_id, "force": force or act == "update"},
+                           "key": key}
+                return self._confirm_needed(decision, payload, sid, uid)
+            if confirm:
+                ok_tok, payload = self.confirm.take(confirm, sid, uid)
+                if not ok_tok:
+                    return {"ok": False, "error": f"confirm token rejected: {payload}"}
+                plugin_id = (payload.get("params") or {}).get("plugin_id", plugin_id)
+                force = (payload.get("params") or {}).get("force", force)
+            result = await self.install_from_store(plugin_id, force=force or act == "update")
+            self.audit.write(kind="write", tool="ops_store", domain="store", action=act,
+                             target=plugin_id, sid=sid, uid=uid, ok=bool(result.get("ok")),
+                             error=str(result.get("error") or ""))
+            return result
+        return {"ok": False, "error": "action must be search / install / update / sources"}
+
+    @register.tool(
+        "ops_confirm",
+        "用高危动作返回的一次性令牌确认执行。令牌有效期默认 300 秒，同会话同用户才能使用，用后即焚。",
+        {"type": "object",
+         "properties": {"token": {"type": "string", "description": "ops_action/ops_config/ops_store 返回的令牌"}},
+         "required": ["token"]}
+    )
+    async def ops_confirm(self, event: KiraMessageBatchEvent, token: str):
+        sid = self._sid(event)
+        uid = self._uid(event)
+        ok_tok, payload = self.confirm.take(token, sid, uid)
+        if not ok_tok:
+            return {"ok": False, "error": f"confirm failed: {payload}"}
+        cap = self._cap(payload.get("cap"))
+        if cap is None:
+            return {"ok": False, "error": "capability no longer exists"}
+        act = payload.get("action")
+        params = payload.get("params") or {}
+        key = payload.get("key") or f"{cap.name}.{act}"
+        if cap.name == "control":
+            decision = self.engine.evaluate_control(sid, key)
+        else:
+            decision = self.engine.evaluate(sid, key, kind="write")
+        if not decision.allowed:
+            return self._deny("ops_confirm", cap.name, act, sid, uid, decision.reason)
+        pre = cap.preflight(act, params)
+        if pre:
+            return self._deny("ops_confirm", cap.name, act, sid, uid, pre)
+        result = await self._execute_write(cap, act, params, key, sid, uid, tool="ops_confirm")
+        return result
+
+    @register.tool(
+        "ops_panic",
+        "紧急刹车：lock=true 立即把所有写操作降级为只读（不影响读）；lock=false 解除。",
+        {"type": "object",
+         "properties": {"lock": {"type": "boolean", "description": "true=全锁只读，false=解锁"}},
+         "required": ["lock"]}
+    )
+    async def ops_panic(self, event: KiraMessageBatchEvent, lock: bool):
+        sid = self._sid(event)
+        uid = self._uid(event)
+        # dedicated gate: unlocking must work even while the lock is engaged
+        if not bool(self.master.get("enabled", True)):
+            return {"ok": False, "error": "kira_ops is disabled in settings"}
+        if self.engine._in(sid, self.engine.access.get("deny_sessions")):
+            return self._deny("ops_panic", "master", "panic", sid, uid, "session is in the deny list")
+        allow = self.engine.access.get("allow_sessions") or []
+        if allow and not self.engine._in(sid, allow):
+            return self._deny("ops_panic", "master", "panic", sid, uid, "session is not in the allow list")
+        pm = getattr(self.ctx, "plugin_mgr", None)
+        if not pm:
+            return {"ok": False, "error": "plugin manager is unavailable"}
+        cfg = dict(self.cfg or {})
+        master = dict(cfg.get("master") or {})
+        master["panic_lock"] = bool(lock)
+        cfg["master"] = master
+        await pm.update_plugin_config(self.plugin_id, cfg)
+        self.audit.write(kind="write", tool="ops_panic", domain="master", action="panic",
+                         sid=sid, uid=uid, ok=True, note=f"lock={bool(lock)}")
+        return {"ok": True, "panic_lock": bool(lock),
+                "hint": "已全锁（只读）" if lock else "已解除全锁"}
+
+    # ==================================================================
+    # WEBUI PANEL
+    # ==================================================================
+
+    @register.page(
+        "/index",
+        menu=PageMenu(label={"zh": "运行自控台", "en": "Ops Console"}, icon="Monitor", order=86),
+    )
+    def page(self):
+        return PluginPage.from_folder("./web")
+
+    def _panel_payload(self):
+        pm = getattr(self.ctx, "plugin_mgr", None)
+        plugins = pm.list_plugins() if pm else []
+        sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
+        mcp = getattr(getattr(self.ctx, "message_processor", None), "mcp_manager", None)
+        try:
+            sessions = self.ctx.session_mgr.get_session_info() or []
+        except Exception:
+            sessions = []
+        provs = getattr(self.ctx, "provider_mgr", None)
+        return {
+            "ok": True,
+            "version": self._manifest_version(),
+            "warnings": self.warnings,
+            "permission": self.engine.summary(),
+            "counts": {
+                "plugins": len(plugins),
+                "plugins_enabled": sum(1 for p in plugins if pm and pm.is_plugin_enabled(p.plugin_id)),
+                "skills": len(sm.skills_info) if sm else 0,
+                "providers": len(provs.get_all_providers() or {}) if provs else 0,
+                "mcp": len(mcp.servers) if mcp else 0,
+                "sessions": len(sessions),
+                "backups": len(self.backups.list(500)),
+                "pending_confirms": self.confirm.pending_count,
+            },
+            "conflicts": self.conflicts(),
+            "agent": {
+                "enabled": bool(pm.is_plugin_enabled("agent")) if pm and pm.has_plugin("agent") else False,
+            },
+        }
+
+    @staticmethod
+    def _manifest_version() -> str:
+        try:
+            import json as _json
+            data = _json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))
+            return str(data.get("version") or "")
+        except Exception:
+            return ""
+
+    @register.api(method="GET", path="/overview", auth=True)
+    async def api_overview(self):
+        return self._panel_payload()
+
+    @register.api(method="GET", path="/config", auth=True)
+    async def api_get_config(self):
+        return {"ok": True, "config": self.cfg, "warnings": self.warnings}
+
+    @register.api(method="POST", path="/config", auth=True)
+    async def api_set_config(self, payload: dict):
+        pm = getattr(self.ctx, "plugin_mgr", None)
+        if not pm:
+            return {"ok": False, "error": "plugin manager is unavailable"}
+        patch = (payload or {}).get("config") or {}
+        if not isinstance(patch, dict):
+            return {"ok": False, "error": "config must be a JSON object"}
+        current = pm.get_plugin_config(self.plugin_id) or {}
+        merged = self.deep_merge(current, patch)
+        await pm.update_plugin_config(self.plugin_id, merged)
+        self.audit.write(kind="write", tool="panel", domain="kira_ops", action="config",
+                         ok=True, note="panel config update")
+        return {"ok": True, "config": merged}
+
+    @register.api(method="POST", path="/panic", auth=True)
+    async def api_panic(self, payload: dict):
+        pm = getattr(self.ctx, "plugin_mgr", None)
+        if not pm:
+            return {"ok": False, "error": "plugin manager is unavailable"}
+        lock = bool((payload or {}).get("lock"))
+        cfg = dict(self.cfg or {})
+        master = dict(cfg.get("master") or {})
+        master["panic_lock"] = lock
+        cfg["master"] = master
+        await pm.update_plugin_config(self.plugin_id, cfg)
+        self.audit.write(kind="write", tool="panel", domain="master", action="panic",
+                         ok=True, note=f"lock={lock}")
+        return {"ok": True, "panic_lock": lock}
+
+    @register.api(method="GET", path="/backups", auth=True)
+    async def api_backups(self):
+        return {"ok": True, "items": self.backups.list(100)}
+
+    @register.api(method="POST", path="/backups/restore", auth=True)
+    async def api_restore(self, payload: dict):
+        bid = str((payload or {}).get("id") or "").strip()
+        force = bool((payload or {}).get("force"))
+        result = self.backups.restore(bid, force=force)
+        self.audit.write(kind="write", tool="panel", domain="backup", action="restore",
+                         target=bid, ok=bool(result.get("ok")),
+                         error=str(result.get("errors") or ""))
+        return result
+
+    @register.api(method="GET", path="/audit", auth=True)
+    async def api_audit(self, limit: int = 50, keyword: str = ""):
+        return {"ok": True, "items": self.audit.tail(int(limit or 50), keyword=keyword or None)}
+
+    @register.api(method="GET", path="/describe", auth=True)
+    async def api_describe(self):
+        load_all()
+        return {"ok": True, "capabilities": [c(self).describe() for c in caps_pkg.REGISTRY.values()]}

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Kira 运行自控台</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>Kira 运行自控台</h1>
+      <span class="ver" id="ver"></span>
+    </div>
+    <div class="actions">
+      <button id="btnReload" class="ghost">重载面板</button>
+      <button id="btnPanic" class="danger">全锁/解锁</button>
+    </div>
+  </header>
+
+  <section id="warnings" class="warn hide"></section>
+
+  <section class="cards" id="cards"></section>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="access">访问控制</button>
+    <button class="tab" data-tab="risk">风险分级</button>
+    <button class="tab" data-tab="control">重启关机</button>
+    <button class="tab" data-tab="protected">数据保护</button>
+    <button class="tab" data-tab="backup">备份</button>
+    <button class="tab" data-tab="audit">审计</button>
+    <button class="tab" data-tab="store">商店</button>
+  </nav>
+
+  <main>
+    <div class="pane active" id="pane-access"></div>
+    <div class="pane" id="pane-risk"></div>
+    <div class="pane" id="pane-control"></div>
+    <div class="pane" id="pane-protected"></div>
+    <div class="pane" id="pane-backup"></div>
+    <div class="pane" id="pane-audit"></div>
+    <div class="pane" id="pane-store"></div>
+  </main>
+
+  <footer>
+    <button id="btnSave" class="primary">保存全部设置（热生效）</button>
+    <span id="saveHint" class="muted"></span>
+  </footer>
+
+  <div id="toast" class="toast hide"></div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,271 @@
+{
+  "master": {
+    "type": "section",
+    "name": "总闸",
+    "collapsed": false,
+    "fields": {
+      "enabled": {
+        "type": "switch",
+        "name": "启用插件",
+        "default": true,
+        "hint": "关闭后工具与面板写操作全部不可用"
+      },
+      "panic_lock": {
+        "type": "switch",
+        "name": "全锁（紧急只读）",
+        "default": false,
+        "hint": "打开后所有写操作立即降级为只读，用于紧急刹车"
+      }
+    }
+  },
+  "access": {
+    "type": "section",
+    "name": "访问控制",
+    "collapsed": false,
+    "fields": {
+      "allow_sessions": {
+        "type": "multi_select",
+        "source": "session",
+        "allow_custom": true,
+        "name": "允许名单",
+        "default": [],
+        "hint": "留空 = 放行所有会话；填写后仅名单内会话可用。可从列表选择或手动输入 adapter:gm/dm:id"
+      },
+      "deny_sessions": {
+        "type": "multi_select",
+        "source": "session",
+        "allow_custom": true,
+        "name": "禁止名单（优先级最高）",
+        "default": [],
+        "hint": "命中即拒绝，优先于允许名单"
+      },
+      "readonly_sessions": {
+        "type": "multi_select",
+        "source": "session",
+        "allow_custom": true,
+        "name": "只读名单",
+        "default": [],
+        "hint": "名单内会话只能读取，任何写操作一律拒绝"
+      }
+    }
+  },
+  "risk": {
+    "type": "section",
+    "name": "风险分级",
+    "collapsed": false,
+    "fields": {
+      "level": {
+        "type": "string",
+        "options": ["readonly", "standard", "dangerous", "full"],
+        "name": "能力档位",
+        "default": "standard",
+        "hint": "readonly=只读；standard=常规读写在控制内（默认）；dangerous=允许高危动作（仍需确认令牌）；full=全开，但重启/关机仍受独立开关约束"
+      },
+      "high_risk_actions": {
+        "type": "multi_select",
+        "options": [
+          "plugin.uninstall", "plugin.disable", "plugin.install", "plugin.update",
+          "skill.remove", "skill.install",
+          "provider.delete_model", "provider.update_model", "provider.sync", "mcp.delete",
+          "session.delete", "session.memory_clear",
+          "persona.create", "persona.update", "persona.delete", "persona.set_active",
+          "config.set_secret", "store.install", "store.update", "backup.restore",
+          "agent.set"
+        ],
+        "allow_custom": true,
+        "name": "高危动作清单",
+        "default": [
+          "plugin.uninstall", "plugin.disable", "plugin.install", "plugin.update",
+          "skill.remove", "skill.install",
+          "provider.delete_model", "provider.update_model", "provider.sync", "mcp.delete",
+          "session.delete", "session.memory_clear",
+          "persona.create", "persona.update", "persona.delete", "persona.set_active",
+          "config.set_secret", "store.install", "store.update", "backup.restore"
+        ],
+        "hint": "勾选哪些动作算高危：需要 dangerous/full 档位 + 高危会话名单 + 确认令牌，三者齐备"
+      },
+      "high_risk_sessions": {
+        "type": "multi_select",
+        "source": "session",
+        "allow_custom": true,
+        "name": "高危会话名单（必填，不继承）",
+        "default": [],
+        "hint": "只有名单内会话能执行高危动作；留空 = 无人可执行（不继承允许/禁止名单，防止顺带提权）"
+      },
+      "require_confirm": {
+        "type": "switch",
+        "name": "高危动作需确认令牌",
+        "default": true,
+        "hint": "执行前先签发一次性确认令牌，调用二次确认工具后才执行"
+      },
+      "confirm_ttl": {
+        "type": "integer",
+        "name": "确认令牌有效期（秒）",
+        "default": 300
+      }
+    }
+  },
+  "control": {
+    "type": "section",
+    "name": "重启与关机",
+    "collapsed": true,
+    "fields": {
+      "allow_restart": {
+        "type": "switch",
+        "name": "允许重启 KiraAI",
+        "default": false,
+        "hint": "默认关闭。开启后仍需 full 档位 + 确认令牌才可执行"
+      },
+      "allow_shutdown": {
+        "type": "switch",
+        "name": "允许关闭 KiraAI",
+        "default": false,
+        "hint": "默认关闭，与重启互不牵连。开启后仍需 full 档位 + 确认令牌"
+      }
+    }
+  },
+  "protected": {
+    "type": "section",
+    "name": "数据保护",
+    "collapsed": true,
+    "fields": {
+      "read_mask": {
+        "type": "list",
+        "name": "读取打码字段关键词",
+        "default": ["api_key", "access_token", "secret", "password", "credential", "token", "private_key"],
+        "hint": "读取配置时，字段名含这些关键词则打码"
+      },
+      "write_deny": {
+        "type": "list",
+        "name": "禁止写入字段关键词",
+        "default": ["api_key", "access_token", "secret", "password", "credential", "private_key"],
+        "hint": "任何域（含 agent 策略）都不能修改含这些关键词的字段"
+      },
+      "write_allow": {
+        "type": "list",
+        "name": "允许写入字段白名单",
+        "default": ["base_url", "api_base", "endpoint", "model_id", "model_name", "models", "timeout", "temperature", "headers", "enabled", "remark", "display_name"],
+        "hint": "仅对 Provider/模型配置写入生效（严格模式）；系统配置写入只按黑名单拦截"
+      },
+      "path_deny_read": {
+        "type": "list",
+        "name": "禁止读取路径",
+        "default": ["data/webui.json", "data/.jwt_secret", "data/data.db"],
+        "hint": "相对 KiraAI 根目录；命中则拒绝读取"
+      },
+      "path_deny_write": {
+        "type": "list",
+        "name": "禁止写入路径",
+        "default": ["core", "webui", "main.py", "data/memory", "data/webui.json", "data/.jwt_secret"],
+        "hint": "相对 KiraAI 根目录；命中则拒绝写入"
+      },
+      "path_deny_delete": {
+        "type": "list",
+        "name": "禁止删除路径",
+        "default": ["core", "webui", "data/memory", "data/plugins", "data/skills"],
+        "hint": "相对 KiraAI 根目录；命中则拒绝删除"
+      },
+      "persona_write": {
+        "type": "switch",
+        "name": "允许修改人设",
+        "default": false,
+        "hint": "默认人设只读；打开后可在 standard 档位修改人设内容"
+      }
+    }
+  },
+  "backup": {
+    "type": "section",
+    "name": "自动备份",
+    "collapsed": true,
+    "fields": {
+      "enabled": {
+        "type": "switch",
+        "name": "启用自动备份",
+        "default": true,
+        "hint": "每次写动作前自动快照，可回滚"
+      },
+      "keep_last": {
+        "type": "integer",
+        "name": "每目标保留份数",
+        "default": 20
+      },
+      "max_age_days": {
+        "type": "integer",
+        "name": "最长保留天数",
+        "default": 7
+      },
+      "max_total_mb": {
+        "type": "integer",
+        "name": "备份总大小上限（MB）",
+        "default": 200
+      },
+      "cleanup_on_start": {
+        "type": "switch",
+        "name": "启动时清理旧备份",
+        "default": true
+      }
+    }
+  },
+  "audit": {
+    "type": "section",
+    "name": "审计",
+    "collapsed": true,
+    "fields": {
+      "enabled": {
+        "type": "switch",
+        "name": "启用审计",
+        "default": true
+      },
+      "audit_reads": {
+        "type": "switch",
+        "name": "记录读取操作",
+        "default": false,
+        "hint": "默认只记写动作与被拒操作，开启后读取也记"
+      },
+      "max_age_days": {
+        "type": "integer",
+        "name": "审计保留天数",
+        "default": 14
+      }
+    }
+  },
+  "store": {
+    "type": "section",
+    "name": "插件商店",
+    "collapsed": true,
+    "fields": {
+      "takeover_store": {
+        "type": "switch",
+        "name": "接管插件商店（互斥）",
+        "default": true,
+        "hint": "开启后检测到原插件商店插件已启用时自动将其关闭（不卸载），避免重复功能"
+      },
+      "store_url": {
+        "type": "string",
+        "name": "商店数据源URL",
+        "default": "https://plugins.kira-ai.top/api/plugins/all"
+      },
+      "github_proxy": {
+        "type": "string",
+        "name": "GitHub 下载加速代理",
+        "default": "",
+        "hint": "留空则自动测速选择最快代理（含直连兜底），单个失败自动剔除"
+      },
+      "request_timeout": {
+        "type": "integer",
+        "name": "请求超时（秒）",
+        "default": 15
+      },
+      "cache_ttl": {
+        "type": "integer",
+        "name": "列表缓存秒数",
+        "default": 300
+      },
+      "max_results": {
+        "type": "integer",
+        "name": "单次搜索结果上限",
+        "default": 10
+      }
+    }
+  }
+}
