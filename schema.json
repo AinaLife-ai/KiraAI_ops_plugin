@@ -69,7 +69,7 @@
           "provider.delete_model", "provider.update_model", "provider.sync", "mcp.delete",
           "session.delete", "session.memory_clear",
           "persona.create", "persona.update", "persona.delete", "persona.set_active",
-          "config.set_secret", "store.install", "store.update", "backup.restore",
+          "store.install", "store.update", "backup.restore",
           "agent.set"
         ],
         "allow_custom": true,
@@ -80,9 +80,9 @@
           "provider.delete_model", "provider.update_model", "provider.sync", "mcp.delete",
           "session.delete", "session.memory_clear",
           "persona.create", "persona.update", "persona.delete", "persona.set_active",
-          "config.set_secret", "store.install", "store.update", "backup.restore"
+          "store.install", "store.update", "backup.restore"
         ],
-        "hint": "勾选哪些动作算高危：需要 dangerous/full 档位 + 高危会话名单 + 确认令牌，三者齐备"
+        "hint": "勾选哪些动作算高危：需要 dangerous/full 档位 + 高危会话名单 + 确认令牌，三者齐备；建议把 agent.set 也勾上（它会放宽文件/命令策略）"
       },
       "high_risk_sessions": {
         "type": "multi_select",
@@ -182,7 +182,7 @@
         "type": "switch",
         "name": "启用自动备份",
         "default": true,
-        "hint": "每次写动作前自动快照，可回滚"
+        "hint": "每次写动作前自动快照，可回滚（插件安装/更新另有目录级回滚）"
       },
       "keep_last": {
         "type": "integer",

@@ -9,7 +9,7 @@ from pathlib import Path
 from core.utils.path_utils import get_config_path, get_data_path
 
 from ..core.redact import flatten
-from . import Capability, fail, ok, register
+from . import Capability, apply_limit, fail, ok, register
 
 PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
@@ -77,7 +77,9 @@ class PluginCap(Capability):
                     "error": (p.error or "")[:160],
                 })
             items.sort(key=lambda x: (not x["enabled"], x["id"].lower()))
-            return ok(count=len(items), items=items)
+            total = len(items)
+            items, truncated = apply_limit(items, params)
+            return ok(count=len(items), total=total, truncated=truncated, items=items)
 
         if action == "info":
             info, err = self._info(params)

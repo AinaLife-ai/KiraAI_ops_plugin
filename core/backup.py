@@ -177,6 +177,15 @@ class BackupManager:
                 break
         return out
 
+    def count(self) -> int:
+        """Number of snapshot folders - no _meta.json is read, unlike list()."""
+        if not self.dir.exists():
+            return 0
+        try:
+            return sum(1 for d in self.dir.iterdir() if d.is_dir())
+        except Exception:
+            return 0
+
     def restore(self, bid: str, force: bool = False) -> dict:
         folder = self.dir / str(bid or "")
         meta = self._load_meta(bid)

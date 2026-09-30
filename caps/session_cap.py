@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, fail, ok, register
+from . import Capability, apply_limit, fail, ok, register
 
 
 @register
@@ -23,6 +23,14 @@ class SessionCap(Capability):
 
     def _sid(self, params):
         return str(params.get("session_id") or params.get("sid") or params.get("target") or "").strip()
+
+    def _known(self, sm, sid: str):
+        """session ids that already exist - get_session_info(sid) would create one."""
+        try:
+            sessions = sm.get_session_info() or []
+        except Exception:
+            return None
+        return {str(getattr(s, "sid", "") or s) for s in sessions}
 
     # ------------------------------------------------------------------
 
@@ -53,11 +61,16 @@ class SessionCap(Capability):
                     "memory_count": count,
                 })
             items.sort(key=lambda x: x["session_id"])
-            return ok(count=len(items), items=items)
+            total = len(items)
+            items, truncated = apply_limit(items, params)
+            return ok(count=len(items), total=total, truncated=truncated, items=items)
         if action == "info":
             sid = self._sid(params)
             if not sid:
                 return fail("session_id is required")
+            known = self._known(sm, sid)
+            if known is not None and sid not in known:
+                return fail(f"session '{sid}' not found")
             try:
                 s = sm.get_session_info(sid)
             except Exception as exc:
@@ -70,6 +83,9 @@ class SessionCap(Capability):
             sid = self._sid(params)
             if not sid:
                 return fail("session_id is required")
+            known = self._known(sm, sid)
+            if known is not None and sid not in known:
+                return fail(f"session '{sid}' not found")
             return ok(session_id=sid, memory_count=sm.get_memory_count(sid))
         return fail(f"unknown read action '{action}'")
 

@@ -18,11 +18,7 @@ class StoreCap(Capability):
     async def handle_read(self, action, params):
         params = params or {}
         if action == "sources":
-            client = self.plugin.store
-            return ok(store_url=client.store_url,
-                      proxy=client.proxy or "(auto)",
-                      cache_ttl=client.cache_ttl,
-                      cached=client._cache is not None)
+            return ok(**self.plugin.store.status())
         if action == "search":
             return await self.plugin.store_search(
                 keyword=str(params.get("keyword") or ""),

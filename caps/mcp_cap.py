@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, fail, ok, register
+from . import Capability, apply_limit, fail, ok, register
 
 
 @register
@@ -51,7 +51,9 @@ class McpCap(Capability):
                     "tool_count": len(s.tools or []),
                     "disabled_tools": list(s.disabled_tools or []),
                 })
-            return ok(count=len(items), items=items)
+            total = len(items)
+            items, truncated = apply_limit(items, params)
+            return ok(count=len(items), total=total, truncated=truncated, items=items)
         if action == "info":
             s, err = self._server(params.get("server_id"))
             if err:
@@ -141,7 +143,11 @@ class McpCap(Capability):
             tool = str(params.get("tool") or "").strip()
             if not tool:
                 return fail("tool name is required")
-            mgr.set_tool_enabled(s.id, tool, bool(params.get("enabled", True)))
+            try:
+                mgr.set_tool_enabled(s.id, tool, bool(params.get("enabled", True)))
+            except Exception as exc:
+                # the framework raises ValueError for an unknown tool name
+                return fail(f"cannot toggle '{tool}' on server '{s.id}': {exc}")
             return ok(server_id=s.id, tool=tool, enabled=bool(params.get("enabled", True)))
         if action == "scope":
             s, err = self._server(params.get("server_id"))

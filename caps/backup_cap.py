@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, fail, ok, register
+from . import Capability, apply_limit, fail, ok, register
 
 
 @register
@@ -21,7 +21,10 @@ class BackupCap(Capability):
         if not bm:
             return fail("backup manager is unavailable")
         if action == "list":
-            return ok(count=len(bm.list(200)), items=bm.list(100))
+            items = bm.list(200)
+            total = len(items)
+            items, truncated = apply_limit(items, params, default=20)
+            return ok(count=len(items), total=total, truncated=truncated, items=items)
         return fail(f"unknown read action '{action}'")
 
     def backup_label(self, action, params):

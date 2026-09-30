@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..core.redact import check_field_write, flatten
-from . import Capability, fail, ok, register
+from . import Capability, apply_limit, fail, ok, register
 
 
 @register
@@ -45,7 +45,9 @@ class ProviderCap(Capability):
                     "model_types": sorted(models.keys()),
                 })
             items.sort(key=lambda x: x["name"].lower())
-            return ok(count=len(items), items=items)
+            total = len(items)
+            items, truncated = apply_limit(items, params)
+            return ok(count=len(items), total=total, truncated=truncated, items=items)
         if action == "info":
             pid = str(params.get("provider_id") or "").strip()
             info = pm.get_provider_info(pid)
@@ -57,10 +59,14 @@ class ProviderCap(Capability):
                       config=self.plugin.mask(dict(info.provider_config or {})))
         if action == "models":
             pid = str(params.get("provider_id") or "").strip()
-            models = pm.get_models(pid)
-            if models is None:
+            if not pid:
+                return fail("provider_id is required")
+            if not pm.get_provider_info(pid):
                 return fail(f"provider '{pid}' not found")
-            return ok(provider_id=pid, models=self.plugin.mask(models))
+            models = pm.get_models(pid) or {}
+            counts = {str(k): len(v or {}) for k, v in models.items()}
+            return ok(provider_id=pid, counts=counts,
+                      models=self.plugin.mask(models))
         if action == "fetch_remote":
             pid = str(params.get("provider_id") or "").strip()
             mtype = str(params.get("model_type") or "llm")

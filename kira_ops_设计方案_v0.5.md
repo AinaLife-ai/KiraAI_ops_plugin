@@ -1,10 +1,20 @@
-# Kira Ops Console 设计方案 v0.4（定稿候选）
+# Kira Ops Console 设计方案 v0.5
 
 > 设计人：爱理奈 · 宿主：KiraAI v2.34.8
 > v0.3 → v0.4 变更：
 > ① **`high_risk_sessions` 改为必填、不继承**（留空 = 无人可执行高危动作；杜绝"白名单里的人顺带拿到高危权"）
 > ② **重启 / 关机拆成两个独立开关**（`allow_restart` / `allow_shutdown`），**默认双关**
-> 状态：待点头开 P0
+>
+> v0.4 → v0.5 变更（1.1.0 落地，全部有测试与反向验证，详见 §15）：
+> ① 工具返回体**加上限**（日志单条截断、`config.get` 无 path 只回顶层概况），
+>    `detail=brief/full` 真正实现
+> ② 插件安装/更新**复用框架官方安装器**（大小·条目·压缩比·Zip-Slip），
+>    并且**更新前备份目录、失败自动回滚**
+> ③ 第三方扩展点 `kira_ops.register_capability` **实现**（含完整校验）
+> ④ 被拒操作（含读拒绝、令牌失败）**必记审计**；令牌 32→64 bit
+> ⑤ `core_version` 由 `>=2.34.8` 修正为 **`>=2.34.6`**（按实际用到的 API 定，理由见 §6）
+> ⑥ `config.set_secret` 死键删除：敏感字段一律硬拦，不提供后门动作
+> 状态：已落地并交付
 
 ---
 
@@ -70,9 +80,20 @@ REGISTRY: dict[str, type[Capability]] = {}
 def register(cls): REGISTRY[cls.name] = cls
 ```
 
-域与方法：`plugin`(list/info/config_get/config_set/enable/disable/reload/install/update/uninstall) `skill`(list/info/refresh/enable/disable/scope/install/export/remove) `provider`(list/info/models/add_model/update_model/delete_model/set_provider/sync/health/fetch_remote) `mcp`(list/info/add/update/delete/enable/disable/tool_toggle/scope) `session`(list/info/title/caps/memory_clear/memory_count/delete/scope_clean) `persona`(list/info/get_active/set_active/create/update/delete) `config`(get/set) `log`(tail/grep/history) `store`(search/install/update/sources) `agent`(get/set) `control`(restart/shutdown)
+域与方法（v0.5 与实现对齐；未实现的 `skill.export` / `session.scope_clean` 已从设计中移除，
+scope 清理在 `session.delete` 内联动完成）：
 
-第三方可注册：`@on.custom_event(event_name="kira_ops.register_capability")` —— 新增能力不碰核心代码
+- `plugin`: list / info / config_get / config_set / enable / disable / reload / install / update / uninstall
+- `skill`: list / info / content / scope / refresh / enable / disable / set_scope / install / remove
+- `provider`: list / info / models / fetch_remote / health / add_model / update_model / delete_model / sync / set_provider
+- `mcp`: list / info / add / update / enable / disable / tool_toggle / scope / delete
+- `session`: list / info / memory_count / title / caps / memory_clear / delete
+- `persona`: list / info / get_active / set_active / create / update / delete
+- `config`: get / set ｜ `log`: tail / search / history / read_file ｜ `backup`: list / restore
+- `store`: search / sources / install / update ｜ `agent`: get / info / set ｜ `control`: info / restart / shutdown
+
+第三方可注册（v0.5 已实现）：`await ctx.emit_custom_event("kira_ops.register_capability", {"class": MyCap})`
+—— 新增能力不碰核心代码，注册前校验 name 合法性与 ACTIONS 形状，非法即拒绝并记 warning
 
 ---
 
@@ -93,8 +114,11 @@ def register(cls): REGISTRY[cls.name] = cls
     "plugin.uninstall","plugin.disable","skill.remove","provider.delete_model",
     "provider.update_model","mcp.delete","session.delete","session.memory_clear",
     "persona.create","persona.update","persona.delete","persona.set_active",
-    "config.set_secret","store.install","store.update","backup.restore",
-    "file.delete","file.overwrite","exec.write"
+    "store.install","store.update","backup.restore",
+    "agent.set"                    // 建议勾选：它会放宽 agent 的文件/命令策略
+    // 注：v0.4 里的 config.set_secret / file.delete / file.overwrite / exec.write
+    //     已删除——敏感字段是硬拦（不提供后门动作），文件/命令操作由 agent 插件执行，
+    //     控制台只托管其策略，不重复实现这些动作。
   ],
   "high_risk_sessions": [],      // ★必填、无继承：留空 = 无人可执行高危动作（见 §3.4）
   "require_confirm": true,
@@ -179,12 +203,12 @@ data/plugin_data/kira_ops/
 | 信息 | 放哪 | 理由 |
 |---|---|---|
 | 能力清单 / 工具用法 | **不注入**，写进工具 description + Cap `describe()` | 零常驻成本 |
-| 系统现状、审计、日志 | 只在 `ops_status` / `ops_read` 被调用时返回 | 按需 |
+| 系统现状、审计、日志 | 只在 `ops_status` / `ops_read` 被调用时返回；**返回值有硬上限**（日志单条 ≤400 字符、`config.get` 无 path 只回顶层概况、单节点 ≤12000 字符） | 按需 + 不爆上下文 |
 | 高危确认提示 | 工具返回体 | 按需 |
 | 档位 / panic / **高危名单未填告警** | 仅异常态往 `chat_env` 追 1 行 | `chat_env` 属动态段，被挪到最新 user 消息，**不动 system 前缀** |
 | 插件/技能变更通知 | `@on.custom_event` → 需要时才注 `chat_env` | 用完即弃 |
 
-**硬规则**：①默认零 system 段注入（不碰 persona/tools/memory 稳定段）②必须注入只进 `chat_env` 或 `persist=False` 的 user 前缀消息 ③`@on.llm_request` 里禁止 I/O（信息一律懒加载到工具）④工具返回默认 brief ⑤不注入大表格，只给计数 + 按需明细。
+**硬规则**：①默认零 system 段注入（不碰 persona/tools/memory 稳定段）②必须注入只进 `chat_env` 或 `persist=False` 的 user 前缀消息 ③`@on.llm_request` 里禁止 I/O（信息一律懒加载到工具）④工具返回默认 brief（`ops_status` 已实现：长列表裁成「前 5 条 + 总数 + truncated」）⑤不注入大表格，只给计数 + 按需明细。
 
 ---
 
@@ -196,7 +220,11 @@ data/plugin_data/kira_ops/
 - 不假设宿主 bot 有特定人格、不引用任何具体 bot 名称；文档举例用占位（`<bot>` / `<owner>`）
 - 面板文案走 `locales`（中/英），可扩展
 - "主人/所有者"概念**不做硬编码**，只作为名单里的可填项
-- 交付物：`README.md`（安装/配置/能力表/回滚）、`CHANGELOG.md`、`manifest.json`（`core_version>=2.34.8`）、面板 `web/`
+- 交付物：`README.md`（安装/配置/能力表/回滚）、`CHANGELOG.md`、`manifest.json`、面板 `web/`、`requirements.txt`、`tests/`
+- `core_version`：**`>=2.34.6`**（v0.4 曾写 `>=2.34.8`，过严；实测用到的最新 API 是
+  2.34.6 的 `download_file(max_bytes=)`，另有 2.34.5 内置 `agent` 插件、
+  2.34.4 MCP `set_tool_enabled`、2.34.0 `multi_select` 动态源。声明过宽会加载成功但运行时崩，
+  声明过严会挡住可用环境，所以按"实际用到的最新 API"定）
 - 兼容：缺失 manager 自动降级；新增 domain 只加文件不破坏旧行为
 
 ---
@@ -229,7 +257,13 @@ async def initialize(self):
 
 - **不卸载**，只关闭（`set_plugin_enabled(pid, False)`，实机已核该方法存在且会 `terminate`）
 - 开关 `takeover_store` 默认 true；关掉则两不相干
-- 接管后能力融合：数据源/缓存/代理测速/zip 安全检查（大小·条目·压缩比·Zip-Slip）/staging 安装/待确认删除 → 分别落 `store.sources`、`ops_store`、全局 `ops_confirm` 令牌池；斜杠命令删除；其 5 个工具归并
+- 接管后能力融合：数据源/缓存/安装/待确认删除 → 分别落 `store.sources`、`ops_store`、全局 `ops_confirm` 令牌池；斜杠命令删除；其 5 个工具归并
+- **v0.5 落地**：下载与解压**不再自研**，直接复用框架 `core/plugin/plugin_installer.py`
+  （大小 50 MiB / 条目 10000 / 压缩比 100:1 / 中央目录 512 KiB / Zip-Slip，以及 GitHub 镜像自动测速、
+  `commit_sha` 固定版本、`is_plugin_installed` 校验）。自研只剩「https-only + 私网地址拦截」的
+  SSRF 守卫（因为商店源 URL 可配）。**更新流程 = 备份目录 → 框架安装器 → `prepare_plugin_reload`
+  → `load_plugin_from_dir` → 校验 plugin_id → 失败则回滚**；`prepare_plugin_reload` 不能省，
+  否则多文件插件只重新执行 `main.py`，`caps/`、`core/` 仍是旧代码（框架自己的 WebUI 更新流程也调它）。
 
 ---
 
@@ -262,7 +296,9 @@ async def initialize(self):
 
 - `data/plugin_data/kira_ops/audit/audit-YYYY-MM-DD.jsonl`
 - 每条：`{ts, sid, uid, tool, domain, action, target, args_masked, ok, err, ms, backup}`
-- 写动作 + 被拒操作**必记**；读动作由 `audit_reads` 控制（默认关，省体积）
+- 写动作 + 被拒操作**必记**（拒绝记录 `kind="deny"`，不受 `audit_reads` 开关影响，
+  包含读权限拒绝与 `ops_confirm` 令牌失败）；读动作由 `audit_reads` 控制（默认关，省体积）
+- 确认令牌 64 bit（`secrets.token_hex(8)`），会话+用户绑定、用后即焚、默认 300s
 - 按日切分 + `max_age_days` 自动清理
 
 ---
@@ -271,13 +307,15 @@ async def initialize(self):
 
 ```
 data/plugins/kira_ops/
-  manifest.json      # core_version>=2.34.8 / repo / locales / tags
-  schema.json        # 7 个 section：master / access / risk / control / protected / backup / store
-  main.py            # 7 工具 + 异常态 chat_env 注入 + 页面/API 注册 + 互斥
+  manifest.json      # core_version>=2.34.6 / repo / locales / tags
+  schema.json        # 8 个 section：master / access / risk / control / protected / backup / audit / store
+  main.py            # 7 工具 + 异常态 chat_env 注入 + 页面/API 注册 + 互斥 + 能力扩展事件
   caps/              # 见 §2.3
-  core/              # permission / paths / fields / confirm / audit / backup / redact
-  store/             # store_client / installer
-  web/               # 面板
+  core/              # permission / paths / confirm / audit / backup / redact
+  store/             # store_client（目录/SSRF 守卫） + installer（框架安装器封装 + 回滚）
+  web/               # 面板（中英双语）
+  tests/             # 白盒 21 + 桩件 30 + 真实框架集成 39
+  requirements.txt
 ```
 
 **面板全热改热重载**：所有 section 走 `@register.api` 读写，写后调 `plugin_mgr.update_plugin_config("kira_ops", ...)`（实机已核：写完即 `init_plugin` 重载实例）→ 配置项**全部热生效**；面板支持全量改配置 + 一键回滚 + 审计查看。内存态落 `plugin_data`，重载不丢。`high_risk_sessions` 标必填 + 未填告警。
@@ -295,6 +333,7 @@ data/plugins/kira_ops/
 | P4 | `ops_store` 接管 + 互斥 + `domain=control`（默认关） |
 | P5 | WebUI 面板（全热改） |
 | P6 | 自测 + 破坏性测试 + README/使用手册（通用版） |
+| P7（1.1.0 补） | **真实框架集成测试**（不再只有桩件）+ 安装/更新回滚 + 返回值上限 + 扩展点落地 |
 
 ---
 
@@ -308,4 +347,47 @@ ctx.session_mgr                        → get_session_info / update_session_inf
 ctx.persona_mgr                        → get_persona / update_persona / set_active_persona / list_personas
 ctx.message_processor.mcp_manager      → add_or_update_server_from_config / delete_server / set_tool_enabled / set_server_scope
 互斥范式                                → alife_memory_z.conflicts() + plugin_mgr.set_plugin_enabled()
+core.plugin.plugin_installer            → install_from_github / install_from_zip /
+                                          install_requirements（含 4 项 zip 防护）
+core.plugin.plugin_registry             → prepare_plugin_reload（热重载前清 sys.modules，更新必调）
+core.utils.network.download_file        → 支持 max_bytes（2.34.6+）
 ```
+
+---
+
+## 15. v0.5 落地修订（1.1.0）—— 审计发现 → 处理
+
+对照 KiraAI v2.34.8 源码 + 真实框架运行期逐项核对后的结论。每条修复都有反向验证：
+新增的 `tests/test_integration_real.py` 在 1.0.0 代码上 **16 项精确变红**，在 1.1.0 上全绿。
+
+| 级别 | 问题 | 处理 |
+| --- | --- | --- |
+| 严重 | 原地更新后旧子模块仍在运行，`plugin/store` 的 install/update **谎报成功** | installer 增加 `prepare_plugin_reload` + plugin_id 校验 + 失败回滚（§8） |
+| 严重 | 安装包无大小/条目/压缩比限制，zip 炸弹可撑爆磁盘 | 复用框架官方安装器（§8） |
+| 严重 | `master.enabled=false` 不生效：工具照注册、`ops_status` 照可用、日志说"未注册" | `ops_status` 加闸门 + 日志如实说明（框架限制写进日志） |
+| 严重 | 返回体无上限：`log.tail` 实测 121,896 字符、`config.get` 43,877 字符 | 单条截断 + 顶层概况 + limit 上下限 clamp（§5） |
+| 高 | agent 域谎报 `plugin_enabled: true`（框架对未知 id 默认 True），`ops_status` 提示是死代码 | 统一 `has_plugin and is_plugin_enabled`，新增 `installed` 字段 |
+| 高 | `core_version >=2.33.1` 过宽，低版本会运行时崩 | 改 `>=2.34.6`（§6） |
+| 中 | 读 `session.info` 会**凭空创建会话** | 先判存在性 |
+| 中 | `kira_ops.register_capability` 只写在文档里，没实现 | 实现 + 完整校验（§2.3） |
+| 中 | `detail=brief/full` 是空参数 | 实现真裁剪（§5） |
+| 中 | 被拒操作未全留痕（读拒绝、令牌失败） | 统一 `kind="deny"` 必记（§11） |
+| 中 | `limit` 在多数 list 上无效 | 全域支持，返回 `total`/`truncated` |
+| 中 | `provider.models` 对不存在的 Provider 返回 ok+空 | 先判存在性 |
+| 中 | 生命周期句柄依赖私有内部（`app.state.lifecycle` 永远 None） | 增加路由对象解析路径 + 缓存 + 失败告警（控制域不可用时可见原因） |
+| 低 | `mcp.tool_toggle` 未捕获框架 ValueError，刷全栈日志 | 包 try，返回可读错误 |
+| 低 | `config.set_secret` 是死键 | 删除，并在文档写明敏感字段硬拦 |
+| 低 | 审计拒绝记录借用 `kind="write"` | 改 `kind="deny"` |
+| 低 | 安装/备份同步文件 IO 阻塞事件循环、面板每次读几百个 `_meta.json` | `asyncio.to_thread` + `BackupManager.count()` |
+| 低 | 每次改配置都刷两条启动告警 | 每条只告警一次 |
+| 低 | 面板只有中文、回滚不能 force | 中英双语 + force 勾选 + agent 状态卡片 |
+| 低 | manifest/README 指向不存在的仓库 | 改真仓库，作者 `AinaLife-ai +znq19` |
+
+**方法论教训（写进本设计以免重犯）**：
+
+1. **桩件测试只能证明逻辑，不能证明契约**。历史上的 class-vs-instance 与陈旧子模块两个 bug
+   都是"47 项测试全绿"的情况下漏出去的 ⇒ 必须有真实框架集成测试。
+2. **判断"更新是否生效"要看子模块的常驻代码**，不能只看 `main.py` 有没有重新执行。
+3. **框架里"未知 id"的默认值往往是 True**（`is_plugin_enabled`），任何"是否可用"的判断都要
+   `has_plugin and is_plugin_enabled`。
+4. **返回值必须设上限**：日志行、配置树、文件尾部都是"看起来小、实际能爆"的典型。
