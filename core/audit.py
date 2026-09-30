@@ -12,6 +12,15 @@ from pathlib import Path
 # audit.tail call afterwards dragged it into the model context.
 MAX_ARGS_CHARS = 2000
 ARGS_PREVIEW_CHARS = 400
+MAX_FIELD_CHARS = 300
+
+
+def _clip_field(value, limit: int = MAX_FIELD_CHARS) -> str:
+    """Keep free-form audit fields bounded (a fuzzed target was 4 kB long)."""
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"…(+{len(text) - limit})"
 
 
 def _compact_args(args) -> object:
@@ -55,10 +64,12 @@ class AuditLog:
                 return
             record = {
                 "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "kind": kind, "tool": tool, "domain": domain, "action": action,
-                "target": str(target or ""), "sid": str(sid or ""), "uid": str(uid or ""),
-                "ok": bool(ok), "err": str(error or ""), "ms": int(ms or 0),
-                "backup": str(backup or ""), "note": str(note or ""),
+                "kind": _clip_field(kind, 16), "tool": _clip_field(tool, 32),
+                "domain": _clip_field(domain, 32), "action": _clip_field(action, 40),
+                "target": _clip_field(target), "sid": _clip_field(sid, 120),
+                "uid": _clip_field(uid, 120),
+                "ok": bool(ok), "err": _clip_field(error), "ms": int(ms or 0),
+                "backup": _clip_field(backup, 120), "note": _clip_field(note),
             }
             if args is not None:
                 record["args"] = _compact_args(args)

@@ -565,6 +565,25 @@ class KiraOpsPlugin(BasePlugin):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _text(value, default: str = "") -> str:
+        """Coerce a tool argument to a clean string.
+
+        Arguments arrive straight from the model, so ``include``/``action``/
+        ``keyword`` can be an int, a bool or a dict. Fuzzing 2k hostile calls
+        produced 177 AttributeErrors from ``.split()``/``.strip()`` on such
+        values - every string parameter goes through here now.
+        """
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        return default if default else str(value).strip()
+
+    @staticmethod
     def _sid(event) -> str:
         sid = getattr(event, "sid", None)
         if sid:
@@ -713,9 +732,10 @@ class KiraOpsPlugin(BasePlugin):
         """
         if not bool(self.master.get("enabled", True)):
             return {"ok": False, "error": "kira_ops is disabled in settings"}
-        full = str(detail or "").strip().lower() == "full"
+        full = self._text(detail, "brief").lower() == "full"
         pm = getattr(self.ctx, "plugin_mgr", None)
-        parts = [p.strip() for p in (include or "resources,plugins,providers,permission").split(",") if p.strip()]
+        include = self._text(include, "resources,plugins,providers,permission")
+        parts = [p.strip() for p in include.split(",") if p.strip()]
         out = {"ok": True, "detail": "full" if full else "brief"}
         if "resources" in parts:
             try:
@@ -818,11 +838,14 @@ class KiraOpsPlugin(BasePlugin):
     )
     async def ops_read(self, event: KiraMessageBatchEvent, domain: str, action: str = "list",
                        target: str = "", keyword: str = "", limit: int = 0, args: dict = None):
+        domain = self._text(domain)
+        target = self._text(target)
+        keyword = self._text(keyword)
         cap = self._cap(domain)
         if cap is None:
             return {"ok": False, "error": f"unknown domain '{domain}'",
                     "domains": sorted(caps_pkg.REGISTRY.keys())}
-        act = (action or "list").strip()
+        act = self._text(action, "list")
         if act not in cap.ACTIONS:
             return {"ok": False, "error": f"unknown action '{act}' for domain '{domain}'",
                     "actions": sorted(cap.ACTIONS.keys())}
@@ -873,6 +896,10 @@ class KiraOpsPlugin(BasePlugin):
     )
     async def ops_config(self, event: KiraMessageBatchEvent, domain: str, patch: dict,
                          target: str = "", path: str = "", confirm: str = ""):
+        domain = self._text(domain)
+        target = self._text(target)
+        path = self._text(path)
+        confirm = self._text(confirm)
         sid = self._sid(event)
         uid = self._uid(event)
         if domain == "config":
@@ -935,11 +962,14 @@ class KiraOpsPlugin(BasePlugin):
     )
     async def ops_action(self, event: KiraMessageBatchEvent, domain: str, action: str,
                          target: str = "", args: dict = None, confirm: str = ""):
+        domain = self._text(domain)
+        target = self._text(target)
+        confirm = self._text(confirm)
         cap = self._cap(domain)
         if cap is None:
             return {"ok": False, "error": f"unknown domain '{domain}'",
                     "domains": sorted(caps_pkg.REGISTRY.keys())}
-        act = (action or "").strip()
+        act = self._text(action)
         if act not in cap.ACTIONS:
             return {"ok": False, "error": f"unknown action '{act}' for domain '{domain}'",
                     "actions": sorted(cap.ACTIONS.keys())}
@@ -997,7 +1027,12 @@ class KiraOpsPlugin(BasePlugin):
     async def ops_store(self, event: KiraMessageBatchEvent, action: str, keyword: str = "",
                         author: str = "", tag: str = "", plugin_id: str = "",
                         force: bool = False, confirm: str = ""):
-        act = (action or "").strip()
+        act = self._text(action)
+        keyword = self._text(keyword)
+        author = self._text(author)
+        tag = self._text(tag)
+        plugin_id = self._text(plugin_id)
+        confirm = self._text(confirm)
         sid = self._sid(event)
         uid = self._uid(event)
         if act == "sources":
@@ -1040,6 +1075,7 @@ class KiraOpsPlugin(BasePlugin):
          "required": ["token"]}
     )
     async def ops_confirm(self, event: KiraMessageBatchEvent, token: str):
+        token = self._text(token)
         sid = self._sid(event)
         uid = self._uid(event)
         ok_tok, payload = self.confirm.take(token, sid, uid)

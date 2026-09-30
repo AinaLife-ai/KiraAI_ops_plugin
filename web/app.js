@@ -251,11 +251,18 @@
       var path = n.dataset.path
       var kind = n.dataset.kind
       var value
+      var usable = true
       if (kind === 'switch') value = !!n.checked
-      else if (kind === 'number') value = n.value === '' ? 0 : Number(n.value)
+      else if (kind === 'number') {
+        // an empty or non-numeric box means "leave the setting alone": writing 0
+        // there would silently reset it to the default
+        var num = Number(n.value)
+        if (n.value === '' || !isFinite(num)) usable = false
+        else value = num
+      }
       else if (kind === 'list') value = n.value.split('\n').map(function (s) { return s.trim() }).filter(Boolean)
       else value = n.value
-      setPath(patch, path, value)
+      if (usable) setPath(patch, path, value)
     })
     return patch
   }
@@ -487,7 +494,13 @@
     if (overview.lang) lang = overview.lang
     var conf = await api('/config')
     cfg = conf.config || {}
-    warnings = (conf.warnings || []).concat(overview.warnings || [])
+    // /config and /overview both carry the standing warnings - show each once
+    var seen = {}
+    warnings = (conf.warnings || []).concat(overview.warnings || []).filter(function (w) {
+      if (seen[w]) return false
+      seen[w] = true
+      return true
+    })
     $('#ver').textContent = overview.version ? ('v' + overview.version) : ''
     render()
   }
@@ -500,6 +513,7 @@
       if (r.ok) {
         toast(t('saved'))
         cfg = r.config || cfg
+        load().catch(function () { /* keep the toast, the next reload will retry */ })
       } else {
         toast(t('saveFailed') + (r.error || ''))
       }
