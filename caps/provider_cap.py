@@ -1,0 +1,181 @@
+"""Provider domain: providers, models and their (protected) configuration."""
+
+from __future__ import annotations
+
+from ..core.redact import check_field_write, flatten
+from . import Capability, fail, ok, register
+
+
+@register
+class ProviderCap(Capability):
+    name = "provider"
+    ACTIONS = {
+        "list":         ("read", False, "列出全部 Provider 与其模型数量"),
+        "info":         ("read", False, "Provider 详情（配置打码）"),
+        "models":       ("read", False, "列出 Provider 的全部模型（配置打码）"),
+        "fetch_remote": ("read", False, "拉取远端模型列表（用于同步）"),
+        "health":       ("read", False, "对指定模型做一次健康检查（会消耗少量额度）"),
+        "add_model":    ("write", False, "新增一个模型配置"),
+        "update_model": ("write", True, "修改一个模型配置"),
+        "delete_model": ("write", True, "删除一个模型配置"),
+        "sync":         ("write", False, "按远端差异批量增删模型"),
+        "set_provider": ("write", False, "替换 Provider 级配置（受字段保护约束）"),
+    }
+
+    def _pm(self):
+        return getattr(self.ctx, "provider_mgr", None)
+
+    # ------------------------------------------------------------------
+
+    async def handle_read(self, action, params):
+        pm = self._pm()
+        if not pm:
+            return fail("provider manager is unavailable")
+        if action == "list":
+            items = []
+            for pid in (pm.get_all_providers() or {}).keys():
+                info = pm.get_provider_info(pid)
+                models = pm.get_models(pid) or {}
+                n = sum(len(v or {}) for v in models.values())
+                items.append({
+                    "provider_id": pid,
+                    "name": getattr(info, "provider_name", "") or pid,
+                    "format": getattr(info, "provider_type", "") or "",
+                    "model_count": n,
+                    "model_types": sorted(models.keys()),
+                })
+            items.sort(key=lambda x: x["name"].lower())
+            return ok(count=len(items), items=items)
+        if action == "info":
+            pid = str(params.get("provider_id") or "").strip()
+            info = pm.get_provider_info(pid)
+            if not info:
+                return fail(f"provider '{pid}' not found")
+            return ok(provider_id=pid,
+                      name=info.provider_name,
+                      format=info.provider_type,
+                      config=self.plugin.mask(dict(info.provider_config or {})))
+        if action == "models":
+            pid = str(params.get("provider_id") or "").strip()
+            models = pm.get_models(pid)
+            if models is None:
+                return fail(f"provider '{pid}' not found")
+            return ok(provider_id=pid, models=self.plugin.mask(models))
+        if action == "fetch_remote":
+            pid = str(params.get("provider_id") or "").strip()
+            mtype = str(params.get("model_type") or "llm")
+            try:
+                remote = pm.fetch_remote_models(pid, mtype)
+                if hasattr(remote, "__await__"):
+                    remote = await remote
+            except Exception as exc:
+                return fail(f"fetch_remote_models failed: {exc}")
+            ids = []
+            for m in remote or []:
+                if isinstance(m, dict):
+                    ids.append(str(m.get("id") or m.get("model") or m.get("name") or ""))
+                else:
+                    ids.append(str(m))
+            return ok(provider_id=pid, model_type=mtype, count=len(ids), models=ids)
+        if action == "health":
+            pid = str(params.get("provider_id") or "").strip()
+            mtype = str(params.get("model_type") or "llm")
+            mid = str(params.get("model_id") or "").strip()
+            res = pm.health_check(pid, mtype, mid)
+            if hasattr(res, "__await__"):
+                res = await res
+            return ok(provider_id=pid, model_type=mtype, model_id=mid, result=res)
+        return fail(f"unknown read action '{action}'")
+
+    # ------------------------------------------------------------------
+
+    def backup_files(self, action, params):
+        from core.utils.path_utils import get_config_path
+        return [get_config_path() / "system_config.json"]
+
+    def backup_label(self, action, params):
+        return f"provider_{action}_{params.get('provider_id') or 'x'}"
+
+    # ------------------------------------------------------------------
+
+    def _check_cfg_fields(self, config):
+        for path, key, _v in flatten(config or {}):
+            good, why = check_field_write(key, self.plugin.engine.protected, restrict=True)
+            if not good:
+                return f"{path}: {why}"
+        return ""
+
+    async def handle_write(self, action, params):
+        pm = self._pm()
+        if not pm:
+            return fail("provider manager is unavailable")
+        pid = str(params.get("provider_id") or "").strip()
+        if action == "add_model":
+            mtype = str(params.get("model_type") or "").strip()
+            mid = str(params.get("model_id") or "").strip()
+            if not pid or not mtype or not mid:
+                return fail("provider_id, model_type and model_id are required")
+            cfg = params.get("config") or {}
+            why = self._check_cfg_fields(cfg)
+            if why:
+                return fail(f"config blocked: {why}")
+            res = pm.register_model(pid, mtype, mid, cfg)
+            if hasattr(res, "__await__"):
+                res = await res
+            found = mid in ((pm.get_models(pid) or {}).get(mtype) or {})
+            return ok(provider_id=pid, model_type=mtype, model_id=mid, registered=bool(found))
+        if action == "update_model":
+            mtype = str(params.get("model_type") or "").strip()
+            mid = str(params.get("model_id") or "").strip()
+            cfg = params.get("config") or {}
+            if not pid or not mtype or not mid:
+                return fail("provider_id, model_type and model_id are required")
+            why = self._check_cfg_fields(cfg)
+            if why:
+                return fail(f"config blocked: {why}")
+            res = pm.update_model(pid, mtype, mid, cfg)
+            if hasattr(res, "__await__"):
+                res = await res
+            return ok(provider_id=pid, model_type=mtype, model_id=mid, updated=bool(res))
+        if action == "delete_model":
+            mtype = str(params.get("model_type") or "").strip()
+            mid = str(params.get("model_id") or "").strip()
+            if not pid or not mtype or not mid:
+                return fail("provider_id, model_type and model_id are required")
+            res = pm.delete_model(pid, mtype, mid)
+            if hasattr(res, "__await__"):
+                res = await res
+            return ok(provider_id=pid, model_type=mtype, model_id=mid, deleted=bool(res))
+        if action == "sync":
+            mtype = str(params.get("model_type") or "").strip()
+            add_ids = [str(x) for x in (params.get("add_ids") or [])]
+            del_ids = [str(x) for x in (params.get("delete_ids") or [])]
+            if not pid or not mtype:
+                return fail("provider_id and model_type are required")
+            res = pm.sync_models(pid, mtype, add_ids, del_ids, params.get("config") or None)
+            if hasattr(res, "__await__"):
+                res = await res
+            return ok(provider_id=pid, model_type=mtype, result=res)
+        if action == "set_provider":
+            cfg = params.get("config") or {}
+            if not isinstance(cfg, dict) or not cfg:
+                return fail("config must be a non-empty JSON object")
+            why = self._check_cfg_fields(cfg)
+            if why:
+                return fail(f"config blocked: {why}")
+            provs = self.plugin.kira_config.get("providers", {}) or {}
+            cur = provs.get(pid)
+            if not isinstance(cur, dict):
+                return fail(f"provider '{pid}' not found")
+            prov_cfg = cur.get("provider_config") or {}
+            prov_cfg = self.plugin.deep_merge(prov_cfg, cfg)
+            cur["provider_config"] = prov_cfg
+            provs[pid] = cur
+            self.plugin.kira_config["providers"] = provs
+            self.plugin.kira_config.save_config()
+            try:
+                pm.set_provider(pid, cur)
+            except Exception as exc:
+                return fail(f"provider config saved but re-instantiate failed: {exc}")
+            return ok(provider_id=pid, applied=sorted(str(k) for k in cfg.keys()))
+        return fail(f"unknown write action '{action}'")
