@@ -20,6 +20,7 @@ import asyncio
 import json
 import shutil
 import sys
+import tempfile
 import types
 import uuid
 import zipfile
@@ -624,6 +625,47 @@ def main():
             ctx.session_mgr.chat_memory.pop("junk_key", None)
     check("malformed chat_memory keys degrade gracefully and can be repaired",
           session_inventory_tolerates_junk)
+
+    def rollback_points_are_instance_local():
+        """A rollback point copied with the folder must not write into the other instance."""
+        target = get_config_path() / "system_config.json"
+        snap = inst.backups.snapshot([target], "instance_origin_probe", "test")
+        _assert(snap.get("id"), snap)
+        meta_path = Path(snap["path"]) / "_meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        entry = meta["files"][0]
+        _assert(entry.get("origin_rel"), f"origin_rel not recorded: {entry}")
+        _assert(meta.get("data"), f"data root not recorded: {meta.keys()}")
+
+        # same-tree restore resolves through the current data dir
+        own = inst.backups.restore(snap["id"], force=True)
+        _assert(own.get("ok"), own)
+        _assert(all(str(target) == p for p in own["restored"]), own)
+
+        # now pretend the folder was copied from another instance: absolute origin,
+        # no relative record (what the old format produced)
+        # realistic shape: another KiraAI tree, as it looks after copying the folder
+        foreign_root = Path(tempfile.mkdtemp(prefix="KiraAI_other_"))
+        foreign_target = foreign_root / "data" / "config" / "system_config.json"
+        foreign_target.parent.mkdir(parents=True, exist_ok=True)
+        foreign_target.write_text("{}", encoding="utf-8")
+        entry.pop("origin_rel", None)
+        entry["origin"] = str(foreign_target)
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        try:
+            blocked = inst.backups.restore(snap["id"], force=True)
+            _assert(not blocked.get("ok"), blocked)
+            _assert(blocked.get("foreign"), blocked)
+            _assert(blocked["restored"] == [], blocked)
+            _assert(foreign_target.read_text(encoding="utf-8") == "{}",
+                    "the other instance's file was overwritten")
+            listed = [i for i in inst.backups.list(50) if i["id"] == snap["id"]]
+            _assert(listed and listed[0].get("foreign"), listed)
+        finally:
+            shutil.rmtree(foreign_root, ignore_errors=True)
+            shutil.rmtree(Path(snap["path"]), ignore_errors=True)
+    check("rollback points never write into another instance's tree",
+          rollback_points_are_instance_local)
 
     def read_file_never_leaks():
         blocked = run(inst.ops_read(ev, "log", "read_file",

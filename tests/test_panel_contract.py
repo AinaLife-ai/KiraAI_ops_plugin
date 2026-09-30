@@ -231,7 +231,11 @@ def main():
             # variables in other functions do not produce false positives
             backups_js = _function_body(js, "renderBackups")
             used = set(re.findall(r"\bb\.([a-zA-Z_]+)", backups_js))
-            missing = sorted(u for u in used if u not in item)
+            # "foreign" is optional on purpose: it is only present when a
+            # rollback point came from another instance, which keeps the
+            # common payload small. Reading it when absent yields undefined.
+            optional = {"foreign"}
+            missing = sorted(u for u in used - optional if u not in item)
             assert not missing, f"backup fields missing: {missing}"
             row = audit["items"][0] if audit["items"] else {
                 "ts": "", "domain": "", "action": "", "ok": True, "err": "", "note": ""}

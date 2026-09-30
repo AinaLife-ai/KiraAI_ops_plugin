@@ -20,6 +20,86 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 
+def _data_base() -> Path:
+    """Resolved data dir of the *current* instance."""
+    try:
+        from core.utils.path_utils import get_data_path
+        return Path(get_data_path()).resolve()
+    except Exception:
+        return Path.cwd() / "data"
+
+
+def _root_base() -> Path:
+    try:
+        from core.utils.path_utils import get_root_path
+        return Path(get_root_path()).resolve()
+    except Exception:
+        return Path.cwd()
+
+
+def record_origin(path) -> dict:
+    """Where a snapshot came from, expressed so it survives a tree copy.
+
+    Instances are usually full copies of each other (KiraAI9 -> KiraAI10), so an
+    absolute path recorded in one tree points at the *other* instance once the
+    folder is copied. ``origin_rel`` is relative to the data dir and is resolved
+    against the current instance at restore time; ``origin`` is kept for humans
+    and for files that live outside data/.
+    """
+    src = Path(str(path))
+    entry = {"origin": str(src), "origin_rel": None}
+    try:
+        entry["origin_rel"] = str(src.resolve().relative_to(_data_base()))
+    except Exception:
+        entry["origin_rel"] = None
+    return entry
+
+
+# Path shapes that identify a KiraAI instance tree. A legacy rollback point
+# (recorded before origin_rel existed) whose absolute path has this shape but
+# lives outside the current root came from another copy of KiraAI.
+_TREE_MARKERS = ("plugin_data", "plugins", "config", "memory", "skills")
+
+
+def _looks_like_another_tree(path: Path) -> bool:
+    parts = [p.lower() for p in path.resolve().parts]
+    if "data" not in parts:
+        return False
+    tail = parts[parts.index("data") + 1:]
+    return bool(tail) and any(marker in tail for marker in _TREE_MARKERS)
+
+
+def resolve_origin(entry) -> tuple:
+    """Return (path, error) for a snapshot entry in *this* instance's tree.
+
+    * ``origin_rel`` (new snapshots): resolved against the current data dir, so
+      a rollback point survives a folder copy and points at this instance's own
+      files.
+    * legacy absolute ``origin``: allowed when it is inside the current root.
+      Paths that look like another KiraAI tree are refused instead of silently
+      writing into the other instance; a plain file outside any tree (an OS
+      config someone chose to snapshot) is still restorable.
+    """
+    rel = entry.get("origin_rel")
+    if rel:
+        return _data_base() / str(rel), ""
+    origin = str(entry.get("origin") or "")
+    if not origin:
+        return None, "rollback entry has no recorded origin"
+    candidate = Path(origin)
+    try:
+        candidate.resolve().relative_to(_root_base())
+        return candidate, ""
+    except Exception:
+        pass
+    if _looks_like_another_tree(candidate):
+        return None, (
+            f"this rollback point belongs to another KiraAI instance "
+            f"({origin}); it travelled here with a copied folder and will not "
+            f"be written outside the current tree")
+    return candidate, ""
+
+
 def file_md5(path) -> str:
     try:
         h = hashlib.md5()
@@ -119,22 +199,26 @@ class BackupManager:
             while dest.exists():
                 dest = folder / f"{src.stem}__{n}{src.suffix}"
                 n += 1
+            record = record_origin(src)
             try:
                 shutil.copy2(src, dest)
-                entries.append({
+                record.update({
                     "name": src.name,
                     "stored": dest.name,
-                    "origin": str(src),
                     "md5": file_md5(src),
                 })
+                entries.append(record)
             except Exception as exc:
-                entries.append({"name": src.name, "origin": str(src), "error": str(exc)})
+                record["error"] = str(exc)
+                entries.append(record)
 
         meta = {
             "id": folder.name,
             "label": _safe_label(label),
             "reason": str(reason or ""),
             "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "root": str(_root_base()),
+            "data": str(_data_base()),
             "files": entries,
             "applied": False,
             "post_md5": {},
@@ -156,9 +240,9 @@ class BackupManager:
             return
         post = {}
         for entry in meta.get("files", []):
-            origin = entry.get("origin")
-            if origin and Path(origin).is_file():
-                post[entry.get("name") or Path(origin).name] = file_md5(Path(origin))
+            target, why = resolve_origin(entry)
+            if target is not None and target.is_file():
+                post[entry.get("name") or target.name] = file_md5(target)
         meta["applied"] = True
         meta["post_md5"] = post
         self._save_meta(bid, meta)
@@ -176,14 +260,22 @@ class BackupManager:
             meta = self._load_meta(folder.name) or {}
             # the absolute path is deliberately not returned: the id is the
             # handle for restore() and this keeps the payload small.
-            out.append({
+            entry = {
                 "id": folder.name,
                 "created": meta.get("created", ""),
                 "label": meta.get("label", ""),
                 "reason": meta.get("reason", ""),
                 "files": len(meta.get("files", []) or []),
                 "applied": bool(meta.get("applied")),
-            })
+            }
+            # a rollback point copied over from another instance cannot be
+            # restored here - say so instead of silently writing elsewhere
+            for recorded in (meta.get("files") or []):
+                target, _why = resolve_origin(recorded)
+                if target is None:
+                    entry["foreign"] = True
+                    break
+            out.append(entry)
             if len(out) >= int(limit or 50):
                 break
         return out
@@ -202,31 +294,39 @@ class BackupManager:
         meta = self._load_meta(bid)
         if not folder.is_dir() or not meta:
             return {"ok": False, "error": f"backup '{bid}' not found"}
-        restored, conflicts, errors = [], [], []
+        restored, conflicts, errors, foreign = [], [], [], []
         for entry in meta.get("files", []):
-            origin = entry.get("origin")
+            target, why = resolve_origin(entry)
             stored = folder / str(entry.get("stored") or entry.get("name") or "")
-            if not origin or not stored.is_file():
+            if target is None:
+                foreign.append(f"{entry.get('name') or '?'}: {why}")
                 continue
-            current = file_md5(origin) if Path(origin).is_file() else ""
+            if not stored.is_file():
+                continue
+            current = file_md5(target) if target.is_file() else ""
             recorded = (meta.get("post_md5") or {}).get(entry.get("name") or "")
             if recorded and current and current != recorded and not force:
-                conflicts.append(origin)
+                conflicts.append(str(target))
                 continue
             try:
-                Path(origin).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(stored, origin)
-                restored.append(origin)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(stored, target)
+                restored.append(str(target))
             except Exception as exc:
-                errors.append(f"{origin}: {exc}")
+                errors.append(f"{target}: {exc}")
         need_force = bool(conflicts) and not force
-        return {
-            "ok": not errors and not need_force,
+        result = {
+            "ok": not errors and not need_force and not foreign,
             "restored": restored,
             "conflicts": conflicts,
             "errors": errors,
             "need_force": need_force,
         }
+        if foreign:
+            result["foreign"] = foreign
+            result["hint"] = ("some entries belong to another KiraAI instance and were "
+                              "skipped - restore them from the instance that created them")
+        return result
 
     # ------------------------------------------------------------------
     # retention

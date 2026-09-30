@@ -143,6 +143,17 @@ A：回滚只需要 `id`（`ops_action(domain=backup, action=restore, target=<id
 写动作的返回里也会带 `回滚点: backups/<id>`；文件都在
 `data/plugin_data/kira_ops/backups/<id>/`，路径可以省下来不占上下文。
 
+**Q：我把 KiraAI 目录整份复制成新实例（KiraAI9 → KiraAI10），旧的回滚点还能用吗？**
+A：**不会写坏老实例，这是关键**。复制过去的旧回滚点会被标成「⚠ 其它实例」，
+点回滚会被明确拒绝（并告诉你是谁的回滚点）——因为它们记录的是老实例的绝对路径。
+新版本产生的回滚点记录的是**相对路径**，复制到新实例后指向新实例自己的文件，可以正常用。
+要清理这些外来回滚点，直接删掉 `data/plugin_data/kira_ops/backups/` 里对应的目录即可。
+
+**Q：我在同一个目录里把 KiraAI 启动了两次会怎样？**
+A：实测不会损坏文件（审计追加、快照目录都用原子占位），但两边会共用同一份 `data/`：
+配置写入是"最后写入者胜"，且框架写配置文件是"先清空再写"，极端情况下另一个进程会读到空文件。
+建议一份目录只跑一个实例（正常部署就是这样，各实例独立目录互不影响）。
+
 **Q：`read_file` 读不了我的配置文件？**
 A：故意的。它只读**日志文件**（`*.log` / `log.log*`）——曾经它能读 `data/` 下任意文件，
 于是「读取打码」形同虚设（密钥、聊天记忆都能被读进模型）。要看配置用 `ops_read(domain=config)`，
@@ -207,14 +218,14 @@ await self.ctx.emit_custom_event("kira_ops.register_capability", {"class": MyCap
 `name` 合法且未被占用、`ACTIONS` 非空且每项是 `(kind, dangerous, description)`、`kind ∈ {read, write}`。
 注册后即可用 `ops_read(domain="mycap", action="ping")`，并自动受权限引擎与审计约束。
 
-### 自测（共 **106** 项，全部离线可跑）
+### 自测（共 **107** 项，全部离线可跑）
 
 | 套件 | 项数 | 覆盖 |
 | --- | --- | --- |
 | `tests/test_kira_ops.py` | 21 | 权限引擎全链路、打码与写保护、确认令牌、备份快照/冲突/清理、导入冒烟、12 域注册表、`limit`/日志截断/brief 裁剪/能力名校验 |
 | `tests/test_live_ops.py` | 14 | 桩上下文驱动 ops_status / ops_read 六域 / ops_config 拒密钥 / 高危令牌与会话绑定 / ops_panic / 审计落盘 / 商店搜索 |
 | `tests/test_live_ops2.py` | 16 | provider 五条路径、persona 三条、mcp 三条、config 写入、agent 策略路径守卫、control 开关与令牌门 |
-| `tests/test_integration_real.py` | 48 | **真实框架对象**加载插件并逐域驱动：12 域全部只读动作 + 更新后子模块必须是新代码 + 恶意压缩包必须被拒 + 全部修复点的反向断言 |
+| `tests/test_integration_real.py` | 49 | **真实框架对象**加载插件并逐域驱动：12 域全部只读动作 + 更新后子模块必须是新代码 + 恶意压缩包必须被拒 + 全部修复点的反向断言 |
 | `tests/test_panel_contract.py` | 7 | 面板静态契约：JS 可解析（node --check）、元素 id / 页签 / API 路径 / 配置路径 / 载荷字段交叉校验 |
 | `tests/validate_schema.py` | — | schema 与 `core_version` 校验 |
 

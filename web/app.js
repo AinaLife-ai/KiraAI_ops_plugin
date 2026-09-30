@@ -52,6 +52,7 @@
       legendBackups: '自动备份（写动作前的快照）',
       thId: '回滚点', thCreated: '时间', thLabel: '目标', thFiles: '文件', thAction: '',
       rollback: '回滚', rollbackForce: '强制', noBackups: '暂无备份',
+      foreign: '其它实例', foreignHint: '这个回滚点来自另一个 KiraAI 实例（随文件夹一起复制过来的），本实例不会去写别人的目录',
       confirmRestore: '确定要恢复 ', confirmRestore2: ' 吗？',
       restored: '已回滚', restoreFailed: '回滚失败: ', needForce: '目标已被外部改动，勾选“强制”再试',
       readBackupsFailed: '读取备份失败: ',
@@ -108,6 +109,7 @@
       legendBackups: 'Automatic backups (snapshot taken before every write)',
       thId: 'Rollback point', thCreated: 'Created', thLabel: 'Target', thFiles: 'Files', thAction: '',
       rollback: 'Restore', rollbackForce: 'force', noBackups: 'No backups yet',
+      foreign: 'other instance', foreignHint: 'This rollback point was copied over from another KiraAI instance; this instance will not write outside its own tree',
       confirmRestore: 'Restore ', confirmRestore2: '?',
       restored: 'Restored', restoreFailed: 'Restore failed: ',
       needForce: 'Target changed outside kira_ops - tick "force" and retry',
@@ -422,8 +424,10 @@
     api('/backups').then(function (res) {
       (res.items || []).forEach(function (b) {
         var tr = el('tr')
+        var label = (b.label || '') + (b.foreign ? ' ⚠ ' + t('foreign') : '')
         tr.innerHTML = '<td>' + b.id + '</td><td>' + (b.created || '') + '</td><td>' +
-          (b.label || '') + '</td><td>' + (b.files || 0) + '</td>'
+          label + '</td><td>' + (b.files || 0) + '</td>'
+        if (b.foreign) tr.title = t('foreignHint')
         var td = el('td')
         var forceWrap = el('label', 'inline')
         var force = el('input', '', '')
@@ -436,7 +440,9 @@
           api('/backups/restore', { id: b.id, force: !!force.checked }).then(function (r) {
             if (r.ok) { toast(t('restored')); return }
             if (r.need_force) { toast(t('needForce')); return }
-            toast(t('restoreFailed') + (r.error || (r.errors || []).join('; ')))
+            var detail = r.error || (r.errors || []).join('; ') ||
+              (r.foreign || []).join('; ') || r.hint || ''
+            toast(t('restoreFailed') + detail)
           })
         }
         td.appendChild(forceWrap)
