@@ -17,7 +17,6 @@ import re
 import socket
 import time
 import urllib.parse
-from typing import Optional
 
 import httpx
 

@@ -78,7 +78,7 @@ class PluginCap(Capability):
                 })
             items.sort(key=lambda x: (not x["enabled"], x["id"].lower()))
             total = len(items)
-            items, truncated = apply_limit(items, params)
+            items, truncated = apply_limit(items, params, default=50)
             return ok(count=len(items), total=total, truncated=truncated, items=items)
 
         if action == "info":

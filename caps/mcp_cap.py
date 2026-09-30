@@ -52,7 +52,7 @@ class McpCap(Capability):
                     "disabled_tools": list(s.disabled_tools or []),
                 })
             total = len(items)
-            items, truncated = apply_limit(items, params)
+            items, truncated = apply_limit(items, params, default=50)
             return ok(count=len(items), total=total, truncated=truncated, items=items)
         if action == "info":
             s, err = self._server(params.get("server_id"))

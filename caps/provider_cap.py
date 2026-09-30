@@ -25,6 +25,28 @@ class ProviderCap(Capability):
     def _pm(self):
         return getattr(self.ctx, "provider_mgr", None)
 
+    def _models(self, pm, pid: str) -> tuple:
+        """Return (models, note).
+
+        ``ProviderManager.get_models()`` maps every ``model_config`` key through
+        the ``ModelType`` enum and raises ValueError for an unknown key (e.g. a
+        legacy ``vlm`` entry in an older config). The framework's own WebUI
+        reads ``model_config`` raw for exactly this reason, so fall back to the
+        raw config instead of failing the whole provider domain.
+        """
+        try:
+            return pm.get_models(pid) or {}, ""
+        except Exception as exc:
+            note = f"framework model index unavailable ({exc}); showing the raw config"
+            try:
+                providers = self.plugin.kira_config.get("providers", {}) or {}
+                raw = (providers.get(pid) or {}).get("model_config") or {}
+                fallback = {str(k): dict(v or {}) for k, v in raw.items()
+                            if isinstance(v, dict)}
+                return fallback, note
+            except Exception:
+                return {}, note
+
     # ------------------------------------------------------------------
 
     async def handle_read(self, action, params):
@@ -33,20 +55,25 @@ class ProviderCap(Capability):
             return fail("provider manager is unavailable")
         if action == "list":
             items = []
-            for pid in (pm.get_all_providers() or {}).keys():
+            configured = list((self.plugin.kira_config.get("providers", {}) or {}).keys())
+            known = list((pm.get_all_providers() or {}).keys())
+            for pid in sorted(set(known) | set(configured)):
                 info = pm.get_provider_info(pid)
-                models = pm.get_models(pid) or {}
-                n = sum(len(v or {}) for v in models.values())
-                items.append({
+                models, note = self._models(pm, pid)
+                entry = {
                     "provider_id": pid,
                     "name": getattr(info, "provider_name", "") or pid,
                     "format": getattr(info, "provider_type", "") or "",
-                    "model_count": n,
+                    "model_count": sum(len(v or {}) for v in models.values()),
                     "model_types": sorted(models.keys()),
-                })
+                    "active": pid in known,
+                }
+                if note:
+                    entry["warning"] = note
+                items.append(entry)
             items.sort(key=lambda x: x["name"].lower())
             total = len(items)
-            items, truncated = apply_limit(items, params)
+            items, truncated = apply_limit(items, params, default=50)
             return ok(count=len(items), total=total, truncated=truncated, items=items)
         if action == "info":
             pid = str(params.get("provider_id") or "").strip()
@@ -63,10 +90,12 @@ class ProviderCap(Capability):
                 return fail("provider_id is required")
             if not pm.get_provider_info(pid):
                 return fail(f"provider '{pid}' not found")
-            models = pm.get_models(pid) or {}
+            models, note = self._models(pm, pid)
             counts = {str(k): len(v or {}) for k, v in models.items()}
-            return ok(provider_id=pid, counts=counts,
-                      models=self.plugin.mask(models))
+            data = ok(provider_id=pid, counts=counts, models=self.plugin.mask(models))
+            if note:
+                data["warning"] = note
+            return data
         if action == "fetch_remote":
             pid = str(params.get("provider_id") or "").strip()
             mtype = str(params.get("model_type") or "llm")

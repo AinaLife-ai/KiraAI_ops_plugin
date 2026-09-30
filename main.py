@@ -300,8 +300,9 @@ class KiraOpsPlugin(BasePlugin):
                 result["hint"] = (f"{'updated' if update else 'installed'} from "
                                   f"{result.get('source') or repo or direct}"
                                   f" ｜ rollback point: backups/{backup['id']}")
-        else:
-            result.setdefault("backup", backup)
+        elif backup.get("id"):
+            result["backup"] = backup
+        if not result.get("ok"):
             logger.error(f"[kira_ops] store install of {plugin_id} failed: {result.get('error')}")
         return result
 
@@ -404,9 +405,10 @@ class KiraOpsPlugin(BasePlugin):
                 "to remove them from the prompt)")
             return
         if self.backups.cleanup_on_start:
-            stats = self.backups.cleanup()
-            self.audit.cleanup()
-            self.log(f"startup cleanup: backups removed={stats.get('removed', 0)}")
+            stats = await asyncio.to_thread(self.backups.cleanup)
+            removed_audit = await asyncio.to_thread(self.audit.cleanup)
+            self.log(f"startup cleanup: backups removed={stats.get('removed', 0)}, "
+                     f"audit files removed={removed_audit}")
         self._check_mandatory_settings()
         if bool(self.store_cfg.get("takeover_store", True)):
             await self._takeover_store()
@@ -639,7 +641,7 @@ class KiraOpsPlugin(BasePlugin):
         full = str(detail or "").strip().lower() == "full"
         pm = getattr(self.ctx, "plugin_mgr", None)
         parts = [p.strip() for p in (include or "resources,plugins,providers,permission").split(",") if p.strip()]
-        out = {"ok": True, "detail": detail}
+        out = {"ok": True, "detail": "full" if full else "brief"}
         if "resources" in parts:
             try:
                 import psutil
@@ -734,7 +736,7 @@ class KiraOpsPlugin(BasePlugin):
                 "action": {"type": "string", "description": "动作，缺省为 list"},
                 "target": {"type": "string", "description": "目标对象 ID（插件ID/技能名/会话ID/ProviderID/服务器ID/人设ID/备份ID）"},
                 "keyword": {"type": "string", "description": "关键词过滤/搜索"},
-                "limit": {"type": "integer", "description": "条数上限"},
+                "limit": {"type": "integer", "description": "条数上限（list 类默认 50，上限 200）"},
                 "args": {"type": "object", "description": "附加参数（JSON 对象）"}
             },
             "required": ["domain"]
@@ -830,17 +832,21 @@ class KiraOpsPlugin(BasePlugin):
                     sid, uid)
             ok_tok, payload = self.confirm.take(confirm, sid, uid)
             if not ok_tok:
-                return {"ok": False, "error": f"confirm token rejected: {payload}"}
+                return self._deny("ops_config", cap.name, act, sid, uid,
+                                  f"confirm token rejected: {payload}")
             params = payload.get("params") or params
         return await self._execute_write(cap, act, params, key, sid, uid, tool="ops_config")
 
     @register.tool(
         "ops_action",
-        "执行 Kira 各域动作（生命周期/写操作）。domain+action 见 describe："
-        "plugin(enable/disable/reload/install/update/uninstall)、skill(refresh/enable/disable/set_scope/remove)、"
-        "provider(add_model/update_model/delete_model/sync)、mcp(add/update/enable/disable/tool_toggle/delete)、"
-        "session(title/caps/memory_clear/delete)、persona(set_active/create/update/delete)、backup(restore)、"
-        "control(restart/shutdown)。高危动作会返回确认令牌，需再调 ops_confirm。",
+        "执行 Kira 各域动作（生命周期/写操作）。domain+action："
+        "plugin(enable/disable/reload/install/update/uninstall)、"
+        "skill(refresh/enable/disable/set_scope/install/remove)、"
+        "provider(add_model/update_model/delete_model/sync/set_provider)、"
+        "mcp(add/update/enable/disable/tool_toggle/scope/delete)、"
+        "session(title/caps/memory_clear/delete)、persona(set_active/create/update/delete)、"
+        "backup(restore)、control(restart/shutdown)。"
+        "高危动作先返回确认令牌，需再调 ops_confirm(token=...)。",
         {
             "type": "object",
             "properties": {
@@ -890,7 +896,8 @@ class KiraOpsPlugin(BasePlugin):
                                                        "params": params, "key": key}, sid, uid)
             ok_tok, payload = self.confirm.take(confirm, sid, uid)
             if not ok_tok:
-                return {"ok": False, "error": f"confirm token rejected: {payload}"}
+                return self._deny("ops_action", domain, act, sid, uid,
+                                  f"confirm token rejected: {payload}")
             return await self._execute_write(cap, act, payload.get("params") or params, key,
                                              sid, uid, tool="ops_action")
         return await self._execute_write(cap, act, params, key, sid, uid, tool="ops_action")
@@ -940,7 +947,8 @@ class KiraOpsPlugin(BasePlugin):
             if confirm:
                 ok_tok, payload = self.confirm.take(confirm, sid, uid)
                 if not ok_tok:
-                    return {"ok": False, "error": f"confirm token rejected: {payload}"}
+                    return self._deny("ops_store", "store", act, sid, uid,
+                                      f"confirm token rejected: {payload}")
                 plugin_id = (payload.get("params") or {}).get("plugin_id", plugin_id)
                 force = (payload.get("params") or {}).get("force", force)
             result = await self.install_from_store(plugin_id, force=force or act == "update")
@@ -968,7 +976,9 @@ class KiraOpsPlugin(BasePlugin):
             return {"ok": False, "error": f"confirm failed: {payload}"}
         cap = self._cap(payload.get("cap"))
         if cap is None:
-            return {"ok": False, "error": "capability no longer exists"}
+            return self._deny("ops_confirm", str(payload.get("cap") or "unknown"),
+                              str(payload.get("action") or "unknown"), sid, uid,
+                              "capability no longer exists")
         act = payload.get("action")
         params = payload.get("params") or {}
         key = payload.get("key") or f"{cap.name}.{act}"

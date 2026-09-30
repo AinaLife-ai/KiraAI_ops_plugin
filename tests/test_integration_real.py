@@ -168,8 +168,12 @@ def main():
           lambda: _assert(len(pm.get_plugin_tools("kira_ops")) == 7,
                           sorted(pm.get_plugin_tools("kira_ops"))))
     check("12 capability domains", lambda: _assert(len(inst.caps) == 12, sorted(inst.caps)))
+    # note: no assertion on *values* here - the config file persists between
+    # runs, so only the presence of every schema section is guaranteed.
     check("plugin config filled from schema",
-          lambda: _assert((cfg_dump.get("risk") or {}).get("level") == "standard"))
+          lambda: _assert(
+              {"master", "access", "risk", "control", "protected", "backup", "audit", "store"}
+              <= set(cfg_dump.keys()), sorted(cfg_dump.keys())))
 
     ev = Ev()
     item = {"n": 0}

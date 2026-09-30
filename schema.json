@@ -8,7 +8,7 @@
         "type": "switch",
         "name": "启用插件",
         "default": true,
-        "hint": "关闭后工具与面板写操作全部不可用"
+        "hint": "关闭后所有工具调用（读与写）一律被拒绝；面板仍可用（保留恢复通道）"
       },
       "panic_lock": {
         "type": "switch",

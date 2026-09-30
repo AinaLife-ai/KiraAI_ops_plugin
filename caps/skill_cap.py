@@ -58,7 +58,7 @@ class SkillCap(Capability):
             } for s in sm.skills_info]
             items.sort(key=lambda x: (not x["enabled"], x["name"].lower()))
             total = len(items)
-            items, truncated = apply_limit(items, params)
+            items, truncated = apply_limit(items, params, default=50)
             return ok(count=len(items), total=total, truncated=truncated, items=items)
         if action == "info":
             s, err = self._skill(params.get("name"))
