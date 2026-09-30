@@ -27,6 +27,8 @@ deployment.
 from __future__ import annotations
 
 import asyncio
+import functools
+import json
 import time
 from pathlib import Path
 
@@ -64,6 +66,44 @@ TARGET_ALIASES = {
     "persona": "persona_id",
     "backup": "backup_id",
 }
+
+
+class Payload(dict):
+    """Tool-result dict that renders as compact JSON.
+
+    The framework builds the tool message with ``ToolResult(str(result))``, so a
+    plain dict would reach the model as a Python repr (``{'ok': True, ...}``,
+    with spaces after ':' and ','). Rendering compact JSON instead is ~7%
+    smaller and hands the model valid JSON (``true`` / ``null`` rather than
+    ``True`` / ``None``). It is still a dict everywhere else, so internal
+    callers and tests keep using ``result["ok"]``.
+    """
+
+    def __str__(self):
+        try:
+            return json.dumps(self, ensure_ascii=False, separators=(",", ":"), default=str)
+        except Exception:
+            return super().__str__()
+
+
+TOOL_METHODS = ("ops_status", "ops_read", "ops_config", "ops_action",
+                "ops_store", "ops_confirm", "ops_panic")
+
+
+def wrap_tool_results(cls):
+    """Wrap every @register.tool method so its result renders as compact JSON."""
+    for name in TOOL_METHODS:
+        original = cls.__dict__.get(name)
+        if original is None or getattr(original, "_kira_ops_rendered", False):
+            continue
+
+        @functools.wraps(original)
+        async def wrapper(self, *args, __original=original, **kwargs):
+            return Payload(await __original(self, *args, **kwargs) or {})
+
+        wrapper._kira_ops_rendered = True
+        setattr(cls, name, wrapper)
+    return cls
 
 
 class KiraOpsPlugin(BasePlugin):
@@ -425,9 +465,9 @@ class KiraOpsPlugin(BasePlugin):
         """Recompute the standing warnings; log each distinct one only once."""
         checks = (
             (not (self.risk.get("high_risk_sessions") or []),
-             "high_risk_sessions 为空：当前没有任何会话可以执行高危动作（这是安全默认，不是故障）"),
+             "高危名单为空：无人可执行高危动作（安全默认，非故障）"),
             (not self.protected.get("persona_write", False),
-             "人设当前为只读（protected.persona_write=false）"),
+             "人设只读（protected.persona_write=false）"),
         )
         self.warnings = [message for active, message in checks if active]
         for message in self.warnings:
@@ -1168,3 +1208,8 @@ class KiraOpsPlugin(BasePlugin):
         else:
             logger.warning(f"[kira_ops] rejected capability from '{source}': {detail}")
         return {"ok": ok, "detail": detail}
+
+
+# Tool results are stringified by the framework when the tool message is built:
+# render them as compact JSON instead of a Python dict repr (see Payload).
+wrap_tool_results(KiraOpsPlugin)

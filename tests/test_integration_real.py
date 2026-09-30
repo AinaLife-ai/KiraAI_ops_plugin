@@ -155,7 +155,13 @@ def main():
     inst = pm.get_plugin_inst("kira_ops")
     check("plugin instance exists", lambda: _assert(inst is not None))
 
+    # Hermetic: the plugin config file persists between runs, so pin the runtime
+    # settings the assertions depend on instead of trusting whatever is on disk.
     cfg_dump = pm.get_plugin_config("kira_ops")
+    cfg_dump["master"] = {"enabled": True, "panic_lock": False}
+    cfg_dump["access"] = {"allow_sessions": [], "deny_sessions": [], "readonly_sessions": []}
+    cfg_dump["risk"] = dict(cfg_dump.get("risk") or {},
+                            level="standard", high_risk_sessions=[])
     inst.cfg = cfg_dump
     inst.refresh_settings(cfg_dump)
     inst.engine.apply_settings(cfg_dump)
@@ -193,6 +199,21 @@ def main():
             r = run(inst.ops_read(Ev(), domain, action, **args))
             _assert(r.get("ok"), json.dumps(r, ensure_ascii=False)[:200])
         check(f"read {domain}.{action}", probe)
+
+    # ---------------------------------------------------------------- output format
+    def output_format():
+        """The bytes the model sees: compact JSON, not a Python dict repr."""
+        from core.agent.tool import ToolResult
+        tool = pm.ctx.tool_mgr.tool_set.get("ops_status")
+        _assert(tool is not None, "ops_status is missing from the global tool set")
+        raw = run(tool.execute(ev))
+        _assert(isinstance(raw, dict), type(raw))
+        text = run(ToolResult(str(raw)).assemble_result())
+        text = text if isinstance(text, str) else str(text)
+        _assert(text.startswith('{"ok":true'), text[:80])
+        _assert("': " not in text, f"python repr leaked: {text[:80]}")
+        _assert("True" not in text and "None" not in text, text[:120])
+    check("tool results reach the model as compact JSON", output_format)
 
     # ---------------------------------------------------------------- S3 gate
     def s3():
@@ -365,6 +386,9 @@ def main():
     check("M2 the register_capability hook is bound and works", m2_event)
 
     # ---------------------------------------------------------------- M4 audit
+    def deny_count():
+        return sum(1 for row in inst.audit.tail(20000) if row.get("kind") == "deny")
+
     def m4_read_deny():
         inst.audit.audit_reads = False
         try:
@@ -373,23 +397,22 @@ def main():
                                   "deny_sessions": [], "readonly_sessions": []}
             settings["master"] = {"enabled": True, "panic_lock": False}
             inst.engine.apply_settings(settings)
-            before = len(inst.audit.tail(500))
+            before = deny_count()
             r = run(inst.ops_read(ev, "plugin", "list"))
             _assert(not r.get("ok"), r)
-            rows = inst.audit.tail(500)
-            _assert(len(rows) > before, "denied read was not audited")
-            _assert(rows[-1].get("kind") == "deny", rows[-1])
+            _assert(deny_count() == before + 1, "denied read was not audited")
+            _assert(inst.audit.tail(1)[-1].get("kind") == "deny")
         finally:
             inst.engine.apply_settings(inst.cfg)
             inst.audit.audit_reads = True
     check("M4 a denied read is written to the audit trail", m4_read_deny)
 
     def m4_confirm_deny():
-        before = len(inst.audit.tail(500))
+        before = deny_count()
         r = run(inst.ops_confirm(ev, "deadbeefdeadbeef"))
         _assert(not r.get("ok"), r)
-        rows = inst.audit.tail(500)
-        _assert(len(rows) > before and rows[-1].get("kind") == "deny", rows[-1])
+        _assert(deny_count() == before + 1, "rejected token was not audited")
+        _assert(inst.audit.tail(1)[-1].get("kind") == "deny")
     check("M4 a rejected confirm token is written to the audit trail", m4_confirm_deny)
 
     # ---------------------------------------------------------------- S1/S2 installer
@@ -439,6 +462,7 @@ def main():
 
     # ---------------------------------------------------------------- L2 mcp toggle
     def l2():
+        inst.engine.apply_settings(inst.cfg)  # guarantee the write gate is open
         r = run(inst.ops_action(ev, "mcp", "add", args={
             "name": "harness", "description": "d",
             "config": {"type": "sse", "url": "https://example.com/sse"}}))

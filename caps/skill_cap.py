@@ -8,7 +8,7 @@ from pathlib import Path
 
 from core.utils.path_utils import get_data_path
 
-from . import Capability, apply_limit, fail, ok, register
+from . import Capability, fail, ok, paged, register
 
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
@@ -57,9 +57,7 @@ class SkillCap(Capability):
                 "path": str(s.path),
             } for s in sm.skills_info]
             items.sort(key=lambda x: (not x["enabled"], x["name"].lower()))
-            total = len(items)
-            items, truncated = apply_limit(items, params, default=50)
-            return ok(count=len(items), total=total, truncated=truncated, items=items)
+            return ok(**paged(items, params, default=50))
         if action == "info":
             s, err = self._skill(params.get("name"))
             if err:

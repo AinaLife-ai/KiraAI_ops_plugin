@@ -125,6 +125,15 @@ def apply_limit(items: list, params: dict, default: int = 0, cap: int = 200) -> 
     return items[:limit], len(items) > limit
 
 
+def paged(items: list, params: dict, default: int = 50, cap: int = 200) -> dict:
+    """Build a list payload: count/total/items (+ truncated only when it is true)."""
+    page, truncated = apply_limit(items, params, default=default, cap=cap)
+    data = {"count": len(page), "total": len(items), "items": page}
+    if truncated:
+        data["truncated"] = True
+    return data
+
+
 def get_cap(name):
     return REGISTRY.get(str(name or ""))
 

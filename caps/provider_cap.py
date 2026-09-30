@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..core.redact import check_field_write, flatten
-from . import Capability, apply_limit, fail, ok, register
+from . import Capability, fail, ok, paged, register
 
 
 @register
@@ -72,9 +72,7 @@ class ProviderCap(Capability):
                     entry["warning"] = note
                 items.append(entry)
             items.sort(key=lambda x: x["name"].lower())
-            total = len(items)
-            items, truncated = apply_limit(items, params, default=50)
-            return ok(count=len(items), total=total, truncated=truncated, items=items)
+            return ok(**paged(items, params, default=50))
         if action == "info":
             pid = str(params.get("provider_id") or "").strip()
             info = pm.get_provider_info(pid)
@@ -92,7 +90,13 @@ class ProviderCap(Capability):
                 return fail(f"provider '{pid}' not found")
             models, note = self._models(pm, pid)
             counts = {str(k): len(v or {}) for k, v in models.items()}
-            data = ok(provider_id=pid, counts=counts, models=self.plugin.mask(models))
+            if params.get("full"):
+                data = ok(provider_id=pid, counts=counts, models=self.plugin.mask(models))
+            else:
+                # ids only: the full per-model config costs hundreds of chars and
+                # is rarely needed - pass args={"full": true} for it.
+                data = ok(provider_id=pid, counts=counts,
+                          models={str(k): sorted(v or {}) for k, v in models.items()})
             if note:
                 data["warning"] = note
             return data

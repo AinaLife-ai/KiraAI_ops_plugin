@@ -58,8 +58,7 @@ class LogCap(Capability):
                 return fail(f"failed to read log cache: {exc}")
             limit = max(1, min(int(params.get("limit") or DEFAULT_TAIL), MAX_TAIL))
             rows = cached[-limit:]
-            return ok(count=len(rows), items=[_row(r) for r in rows],
-                      note=f"每条消息最多 {MAX_MESSAGE_CHARS} 字符")
+            return ok(count=len(rows), items=[_row(r) for r in rows])
         if action == "search":
             keyword = str(params.get("keyword") or "").strip().lower()
             if not keyword:
@@ -74,8 +73,7 @@ class LogCap(Capability):
                 if keyword in str(r.get("message", "")).lower()
                 or keyword in str(r.get("name", "")).lower()
             ]
-            return ok(count=len(hits[-limit:]), items=[_row(r) for r in hits[-limit:]],
-                      note=f"每条消息最多 {MAX_MESSAGE_CHARS} 字符")
+            return ok(count=len(hits[-limit:]), items=[_row(r) for r in hits[-limit:]])
         if action == "history":
             data_dir = get_data_path()
             files = []

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, apply_limit, fail, ok, register
+from . import Capability, fail, ok, paged, register
 
 
 @register
@@ -39,9 +39,7 @@ class PersonaCap(Capability):
                 "active": bool(p.is_active),
                 "length": len(p.content or ""),
             } for p in personas]
-            total = len(items)
-            items, truncated = apply_limit(items, params, default=50)
-            return ok(count=len(items), total=total, truncated=truncated, items=items)
+            return ok(**paged(items, params, default=50))
         if action == "get_active":
             try:
                 p = await pm.get_active_persona()

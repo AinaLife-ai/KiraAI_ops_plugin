@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, apply_limit, fail, ok, register
+from . import Capability, fail, ok, paged, register
 
 
 @register
@@ -61,9 +61,7 @@ class SessionCap(Capability):
                     "memory_count": count,
                 })
             items.sort(key=lambda x: x["session_id"])
-            total = len(items)
-            items, truncated = apply_limit(items, params, default=50)
-            return ok(count=len(items), total=total, truncated=truncated, items=items)
+            return ok(**paged(items, params, default=50))
         if action == "info":
             sid = self._sid(params)
             if not sid:
@@ -75,10 +73,20 @@ class SessionCap(Capability):
                 s = sm.get_session_info(sid)
             except Exception as exc:
                 return fail(f"session not found: {exc}")
-            return ok(session_id=sid,
+            merged = self.ctx.get_session_capabilities(sid) or {}
+            if params.get("full"):
+                caps = merged
+            else:
+                caps = {str(k): bool((v or {}).get("enabled", True))
+                        for k, v in merged.items() if isinstance(v, dict)}
+            overrides = sm.get_effective_capabilities(sid, {}) or {}
+            data = ok(session_id=sid,
                       title=getattr(s, "session_title", "") or "",
                       description=getattr(s, "session_description", "") or "",
-                      capabilities=self.ctx.get_session_capabilities(sid) or {})
+                      capabilities=caps)
+            if overrides:
+                data["overrides"] = overrides
+            return data
         if action == "memory_count":
             sid = self._sid(params)
             if not sid:

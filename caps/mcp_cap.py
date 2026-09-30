@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, apply_limit, fail, ok, register
+from . import Capability, fail, ok, paged, register
 
 
 @register
@@ -43,17 +43,18 @@ class McpCap(Capability):
         if action == "list":
             items = []
             for s in mgr.servers:
-                items.append({
+                entry = {
                     "id": s.id,
                     "name": s.name,
                     "enabled": bool(s.enabled),
                     "type": s.type,
-                    "tool_count": len(s.tools or []),
-                    "disabled_tools": list(s.disabled_tools or []),
-                })
-            total = len(items)
-            items, truncated = apply_limit(items, params, default=50)
-            return ok(count=len(items), total=total, truncated=truncated, items=items)
+                }
+                if s.tools:
+                    entry["tools"] = len(s.tools)
+                if s.disabled_tools:
+                    entry["disabled_tools"] = list(s.disabled_tools)
+                items.append(entry)
+            return ok(**paged(items, params, default=50))
         if action == "info":
             s, err = self._server(params.get("server_id"))
             if err:

@@ -9,7 +9,7 @@ from pathlib import Path
 from core.utils.path_utils import get_config_path, get_data_path
 
 from ..core.redact import flatten
-from . import Capability, apply_limit, fail, ok, register
+from . import Capability, fail, ok, paged, register
 
 PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
@@ -77,15 +77,12 @@ class PluginCap(Capability):
                     "error": (p.error or "")[:160],
                 })
             items.sort(key=lambda x: (not x["enabled"], x["id"].lower()))
-            total = len(items)
-            items, truncated = apply_limit(items, params, default=50)
-            return ok(count=len(items), total=total, truncated=truncated, items=items)
+            return ok(**paged(items, params, default=50))
 
         if action == "info":
             info, err = self._info(params)
             if err:
                 return err
-            manifest = pm.get_plugin_manifest(info.plugin_id) or {}
             load_errors = pm.get_plugin_load_errors() or {}
             err_info = load_errors.get(info.plugin_id) or {}
             data = {
@@ -93,7 +90,7 @@ class PluginCap(Capability):
                 "name": info.display_name,
                 "version": info.version,
                 "author": info.author,
-                "description": info.description,
+                "description": str(info.description or "")[:120],
                 "repo": info.repo,
                 "core_version": info.core_version,
                 "tags": list(info.tags or []),
@@ -103,7 +100,6 @@ class PluginCap(Capability):
                 "enabled": pm.is_plugin_enabled(info.plugin_id),
                 "load_error": (err_info.get("error") if isinstance(err_info, dict) else str(err_info or "")) or (info.error or ""),
                 "has_schema": bool(pm.get_plugin_schema(info.plugin_id)),
-                "manifest_keys": sorted(list(manifest.keys()))[:20],
             }
             if str(params.get("detail") or "") == "full":
                 data["config"] = self.plugin.mask(pm.get_plugin_config(info.plugin_id))

@@ -134,6 +134,19 @@ A：本插件**不重复实现**。文件读写、命令执行由 KiraAI 内置�
 A：不带 `path` 时只回顶层概况（键名/类型/规模）——整棵系统配置动辄几万字符，
 会把上下文挤爆。要具体节点就传 `path`，例如 `bot_config.bot`。
 
+**Q：`provider.models` 只给了模型 ID？**
+A：默认只回 `{类型: [模型ID]}`（够用且省 token）；要每个模型的完整配置就传
+`args={"full": true}`。`session.info` 的能力也是同理（默认只回 `{能力: 是否启用}`）。
+
+**Q：`backup.list` 里没有路径？**
+A：回滚只需要 `id`（`ops_action(domain=backup, action=restore, target=<id>)`），
+写动作的返回里也会带 `回滚点: backups/<id>`；文件都在
+`data/plugin_data/kira_ops/backups/<id>/`，路径可以省下来不占上下文。
+
+**Q：工具返回的是 JSON 吗？**
+A：是。工具返回 `Payload`（dict 子类），框架把它字符串化时输出**紧凑 JSON**
+（`{"ok":true,...}`）——比 Python dict 的 repr 更短，而且是合法 JSON。
+
 **Q：日志读出来是截断的？**
 A：单条日志默认截断到 400 字符（结尾标 `…(+N chars)`）。KiraAI 的日志里常有几 KB 的
 JSON 单行，不截断一次就能吐 12 万字符（≈6 万 token）。要更多就配合 `keyword` 搜索。
@@ -179,14 +192,14 @@ await self.ctx.emit_custom_event("kira_ops.register_capability", {"class": MyCap
 `name` 合法且未被占用、`ACTIONS` 非空且每项是 `(kind, dangerous, description)`、`kind ∈ {read, write}`。
 注册后即可用 `ops_read(domain="mycap", action="ping")`，并自动受权限引擎与审计约束。
 
-### 自测（共 **90** 项，全部离线可跑）
+### 自测（共 **91** 项，全部离线可跑）
 
 | 套件 | 项数 | 覆盖 |
 | --- | --- | --- |
 | `tests/test_kira_ops.py` | 21 | 权限引擎全链路、打码与写保护、确认令牌、备份快照/冲突/清理、导入冒烟、12 域注册表、`limit`/日志截断/brief 裁剪/能力名校验 |
 | `tests/test_live_ops.py` | 14 | 桩上下文驱动 ops_status / ops_read 六域 / ops_config 拒密钥 / 高危令牌与会话绑定 / ops_panic / 审计落盘 / 商店搜索 |
 | `tests/test_live_ops2.py` | 16 | provider 五条路径、persona 三条、mcp 三条、config 写入、agent 策略路径守卫、control 开关与令牌门 |
-| `tests/test_integration_real.py` | 39 | **真实框架对象**加载插件并逐域驱动：12 域全部只读动作 + 更新后子模块必须是新代码 + 恶意压缩包必须被拒 + 全部修复点的反向断言 |
+| `tests/test_integration_real.py` | 40 | **真实框架对象**加载插件并逐域驱动：12 域全部只读动作 + 更新后子模块必须是新代码 + 恶意压缩包必须被拒 + 全部修复点的反向断言 |
 | `tests/validate_schema.py` | — | schema 与 `core_version` 校验 |
 
 ```bash

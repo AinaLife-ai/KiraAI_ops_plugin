@@ -164,6 +164,8 @@ class BackupManager:
         )
         for folder in folders:
             meta = self._load_meta(folder.name) or {}
+            # the absolute path is deliberately not returned: the id is the
+            # handle for restore() and this keeps the payload small.
             out.append({
                 "id": folder.name,
                 "created": meta.get("created", ""),
@@ -171,7 +173,6 @@ class BackupManager:
                 "reason": meta.get("reason", ""),
                 "files": len(meta.get("files", []) or []),
                 "applied": bool(meta.get("applied")),
-                "path": str(folder),
             })
             if len(out) >= int(limit or 50):
                 break

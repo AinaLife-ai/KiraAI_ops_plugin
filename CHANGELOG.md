@@ -66,6 +66,25 @@
   （WebUI 路由对象上的 lifecycle），加缓存，并在全部失败时**告警一次**，
   让"重启/关机为什么拒绝执行"可见。
 
+### 返回体精简与格式（同一批修复内的第二轮）
+
+- **工具返回值改为紧凑 JSON**：框架构建 tool 消息时会 `str(result)`，所以原来模型看到的是
+  Python 字典的 repr（`{'ok': True, ...}`，每个 `:` 和 `,` 后面都带空格、布尔是 `True`/`None`）。
+  现在工具统一返回 `Payload`（dict 子类，`__str__` = 紧凑 JSON），实测**整体再省 ~7%**，
+  而且是合法 JSON（`true`/`null`），内部与测试仍按 dict 使用。
+- **列表类去掉重复键、只回必要字段**：`truncated` 仅在真被截断时出现；
+  `backup.list` 不再回绝对 `path`（`id` 就是回滚句柄，`hint` 里也带）；
+  `mcp.list` 省略空的 `disabled_tools` 与 0 的 `tools`；
+  `plugin.info` 的 `description` 截 120 字符、去掉 `manifest_keys`。
+- **大对象默认只给摘要、要明细显式开**：
+  `provider.models` 默认只回 `{类型: [模型ID]}`（`args={"full": true}` 才给完整配置，实测 −42%）；
+  `session.info` 的 `capabilities` 默认只回 `{能力: 是否启用}`，有会话级覆盖时额外给 `overrides`
+  （`args={"full": true}` 才给完整树，实测 −36%）。
+- 实测同一批 34 次代表性调用：**9,405 → 8,383 字符（−11%）**；重灾区降幅更大
+  （backup.list −37%、plugin.info −38%、session.info −36%、provider.models −42%）。
+- 仍然**保留 JSON 结构**：列式/TSV 之类的格式还能再省 10~13%，但值里会含分隔符与换行
+  （日志、描述、错误串），需要转义规则；一次误读要多花一整轮上下文，得不偿失。设计文档 §5 有完整对比。
+
 ### 低 / 打磨
 
 - `mcp.tool_toggle` 补 try/except：框架对未知工具抛 ValueError，之前会打全栈日志；
@@ -83,13 +102,13 @@
 - 文档：README 与设计文档全面修订（仓库地址、作者、core_version、安全说明、
   安装/更新与回滚流程、扩展点用法、测试清单）。
 
-### 测试（47 → 90 项）
+### 测试（47 → 91 项）
 
-- 新增 `tests/test_integration_real.py`（**39 项**）：**用真实框架对象**（KiraConfig /
+- 新增 `tests/test_integration_real.py`（**40 项**）：**用真实框架对象**（KiraConfig /
   DatabaseService / ProviderManager / FuncToolManager / PersonaManager / SessionManager /
   MCPManager / SkillsManager / PluginManager）加载插件并逐域驱动，
   覆盖 12 域全部只读动作 + 上述每一条修复，含「更新后子模块必须是新代码」和
-  「恶意压缩包必须被拒绝」两条契约级断言。
+  「恶意压缩包必须被拒绝」「工具结果必须是紧凑 JSON」三条契约级断言。
   其余三套旧测试全是桩件（FakeCtx/FakeMcpMgr/...）——桩件能证明逻辑，
   **证明不了契约**，class-vs-instance 与陈旧子模块两个 bug 正是这样漏过去的。
 - `tests/test_kira_ops.py` 17 → **21 项**（新增 `apply_limit` / 日志截断 / brief 裁剪 / 能力名校验）。
