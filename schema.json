@@ -8,7 +8,7 @@
         "type": "switch",
         "name": "启用插件",
         "default": true,
-        "hint": "关闭后工具与面板写操作全部不可用"
+        "hint": "关闭后所有工具调用（读与写）一律被拒绝；面板仍可用（保留恢复通道）"
       },
       "panic_lock": {
         "type": "switch",
@@ -69,7 +69,7 @@
           "provider.delete_model", "provider.update_model", "provider.sync", "mcp.delete",
           "session.delete", "session.memory_clear",
           "persona.create", "persona.update", "persona.delete", "persona.set_active",
-          "config.set_secret", "store.install", "store.update", "backup.restore",
+          "store.install", "store.update", "backup.restore",
           "agent.set"
         ],
         "allow_custom": true,
@@ -80,9 +80,9 @@
           "provider.delete_model", "provider.update_model", "provider.sync", "mcp.delete",
           "session.delete", "session.memory_clear",
           "persona.create", "persona.update", "persona.delete", "persona.set_active",
-          "config.set_secret", "store.install", "store.update", "backup.restore"
+          "store.install", "store.update", "backup.restore"
         ],
-        "hint": "勾选哪些动作算高危：需要 dangerous/full 档位 + 高危会话名单 + 确认令牌，三者齐备"
+        "hint": "勾选哪些动作算高危：需要 dangerous/full 档位 + 高危会话名单 + 确认令牌，三者齐备；建议把 agent.set 也勾上（它会放宽文件/命令策略）"
       },
       "high_risk_sessions": {
         "type": "multi_select",
@@ -132,14 +132,14 @@
       "read_mask": {
         "type": "list",
         "name": "读取打码字段关键词",
-        "default": ["api_key", "access_token", "secret", "password", "credential", "token", "private_key"],
-        "hint": "读取配置时，字段名含这些关键词则打码"
+        "default": ["api_key", "access_token", "secret", "password", "credential", "token", "private_key", "authorization", "bearer", "cookie"],
+        "hint": "读取配置时字段名含这些关键词即打码；另有 authorization/bearer/cookie/api_key 等为内置底线，删不掉"
       },
       "write_deny": {
         "type": "list",
         "name": "禁止写入字段关键词",
-        "default": ["api_key", "access_token", "secret", "password", "credential", "private_key"],
-        "hint": "任何域（含 agent 策略）都不能修改含这些关键词的字段"
+        "default": ["api_key", "access_token", "secret", "password", "credential", "private_key", "authorization", "bearer", "cookie"],
+        "hint": "任何域（含 agent 策略）都不能修改含这些关键词的字段；内置底线同上"
       },
       "write_allow": {
         "type": "list",
@@ -182,7 +182,7 @@
         "type": "switch",
         "name": "启用自动备份",
         "default": true,
-        "hint": "每次写动作前自动快照，可回滚"
+        "hint": "每次写动作前自动快照，可回滚（插件安装/更新另有目录级回滚）"
       },
       "keep_last": {
         "type": "integer",

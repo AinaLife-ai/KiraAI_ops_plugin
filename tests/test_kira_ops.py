@@ -285,6 +285,43 @@ def main():
         assert not missing, f"missing caps: {missing}"
     check("capability registry has all 12 domains", t_caps)
 
+    # ---- new helpers: registry extension point, limit, log clipping -------
+    def t_apply_limit():
+        from plugins.kira_ops.caps import apply_limit
+        items = list(range(50))
+        assert apply_limit(items, {}) == (items, False)
+        assert apply_limit(items, {"limit": 0}) == (items, False)
+        assert apply_limit(items, {"limit": 3}, cap=10) == ([0, 1, 2], True)
+        assert apply_limit(items, {"limit": 999}, cap=10) == (list(range(10)), True)
+        assert apply_limit(items, {"limit": "junk"}, default=2)[0] == [0, 1]
+    check("apply_limit honours limit / default / cap", t_apply_limit)
+
+    def t_log_clip():
+        from plugins.kira_ops.caps.log_cap import MAX_MESSAGE_CHARS, _clip
+        assert len(_clip("a" * 5000)) <= MAX_MESSAGE_CHARS + 30
+        assert "(+" in _clip("a" * 5000)
+        assert _clip("short") == "short"
+        assert _clip(None) == ""
+    check("log messages are clipped before they reach the model", t_log_clip)
+
+    def t_brief():
+        from plugins.kira_ops.main import KiraOpsPlugin
+        assert KiraOpsPlugin._trim([1, 2]) == [1, 2]
+        trimmed = KiraOpsPlugin._trim(list(range(20)))
+        assert trimmed["count"] == 20 and len(trimmed["items"]) == 5
+        payload = KiraOpsPlugin._brief({"s": {"l": list(range(20))}})
+        assert payload["detail"] == "brief" and "hint" in payload
+        assert payload["s"]["l"]["truncated"] is True
+    check("brief mode trims long lists instead of dropping sections", t_brief)
+
+    def t_cap_name_re():
+        from plugins.kira_ops.caps import CAP_NAME_RE
+        assert CAP_NAME_RE.match("probe") and CAP_NAME_RE.match("a_b2")
+        assert not CAP_NAME_RE.match("Probe")
+        assert not CAP_NAME_RE.match("")
+        assert not CAP_NAME_RE.match("a" * 40)
+    check("capability names are validated", t_cap_name_re)
+
     print()
     print(f"passed: {len(PASSED)}  failed: {len(FAILED)}")
     if FAILED:

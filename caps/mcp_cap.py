@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, fail, ok, register
+from . import Capability, fail, ok, paged, register
 
 
 @register
@@ -43,15 +43,18 @@ class McpCap(Capability):
         if action == "list":
             items = []
             for s in mgr.servers:
-                items.append({
+                entry = {
                     "id": s.id,
                     "name": s.name,
                     "enabled": bool(s.enabled),
                     "type": s.type,
-                    "tool_count": len(s.tools or []),
-                    "disabled_tools": list(s.disabled_tools or []),
-                })
-            return ok(count=len(items), items=items)
+                }
+                if s.tools:
+                    entry["tools"] = len(s.tools)
+                if s.disabled_tools:
+                    entry["disabled_tools"] = list(s.disabled_tools)
+                items.append(entry)
+            return ok(**paged(items, params, default=50))
         if action == "info":
             s, err = self._server(params.get("server_id"))
             if err:
@@ -107,7 +110,7 @@ class McpCap(Capability):
             try:
                 server = mgr.add_or_update_server_from_config(name, desc, cfg)
             except Exception as exc:
-                return fail(f"add MCP server failed: {exc}")
+                return fail(f"add MCP server failed: {exc!r}")
             return ok(server_id=server.id, name=server.name)
         if action == "update":
             s, err = self._server(params.get("server_id"))
@@ -120,7 +123,7 @@ class McpCap(Capability):
                 await mgr.update_server_from_editor(s.id, params.get("name") or s.name,
                                                     str(params.get("description") or s.description), editor)
             except Exception as exc:
-                return fail(f"update MCP server failed: {exc}")
+                return fail(f"update MCP server failed: {exc!r}")
             return ok(server_id=s.id)
         if action in ("enable", "disable"):
             s, err = self._server(params.get("server_id"))
@@ -132,7 +135,7 @@ class McpCap(Capability):
                 else:
                     await mgr.disable_server(s.id)
             except Exception as exc:
-                return fail(f"{action} MCP server failed: {exc}")
+                return fail(f"{action} MCP server failed: {exc!r}")
             return ok(server_id=s.id, enabled=(action == "enable"))
         if action == "tool_toggle":
             s, err = self._server(params.get("server_id"))
@@ -141,7 +144,11 @@ class McpCap(Capability):
             tool = str(params.get("tool") or "").strip()
             if not tool:
                 return fail("tool name is required")
-            mgr.set_tool_enabled(s.id, tool, bool(params.get("enabled", True)))
+            try:
+                mgr.set_tool_enabled(s.id, tool, bool(params.get("enabled", True)))
+            except Exception as exc:
+                # the framework raises ValueError for an unknown tool name
+                return fail(f"cannot toggle '{tool}' on server '{s.id}': {exc}")
             return ok(server_id=s.id, tool=tool, enabled=bool(params.get("enabled", True)))
         if action == "scope":
             s, err = self._server(params.get("server_id"))
@@ -160,6 +167,6 @@ class McpCap(Capability):
             try:
                 await mgr.delete_server(s.id)
             except Exception as exc:
-                return fail(f"delete MCP server failed: {exc}")
+                return fail(f"delete MCP server failed: {exc!r}")
             return ok(server_id=s.id, deleted=True)
         return fail(f"unknown write action '{action}'")

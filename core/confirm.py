@@ -14,6 +14,9 @@ class ConfirmPool:
         self.max_pending = max(4, int(max_pending or 32))
         self._pending = {}
 
+    # 64 bits: rejections are audited, but a short token is a needless risk.
+    TOKEN_BYTES = 8
+
     def _gc(self) -> None:
         now = time.time()
         for key in [k for k, v in self._pending.items() if v["expires"] < now]:
@@ -25,7 +28,7 @@ class ConfirmPool:
         if len(self._pending) >= self.max_pending:
             oldest = min(self._pending.items(), key=lambda kv: kv[1]["created"])[0]
             self._pending.pop(oldest, None)
-        token = secrets.token_hex(4)
+        token = secrets.token_hex(self.TOKEN_BYTES)
         record = {
             "token": token,
             "created": time.time(),

@@ -1,13 +1,137 @@
-/* Kira Ops Console panel logic - vanilla JS, talks to the plugin API. */
+/* Kira Ops Console panel logic - vanilla JS, talks to the plugin API.
+   All user-facing text lives in STR so the panel follows the KiraAI language
+   (ctx.get_lang()) and can be switched from the header button. */
 (function () {
   'use strict'
-  try {
-    var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
-    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
-  } catch (e) { /* ignore */ }
+
+  var STR = {
+    zh: {
+      brand: 'Kira 运行自控台',
+      reload: '重载面板',
+      panic: '全锁/解锁',
+      save: '保存全部设置（热生效）',
+      saving: '保存中…',
+      saved: '已保存并热生效',
+      saveFailed: '保存失败: ',
+      loadFailed: '加载失败: ',
+      reloaded: '已重载',
+      lang: 'EN',
+      tabAccess: '访问控制', tabRisk: '风险分级', tabControl: '重启关机', tabProtected: '数据保护',
+      tabBackup: '备份', tabAudit: '审计', tabStore: '商店',
+      cardPlugins: '插件', cardSkills: '技能', cardProviders: 'Provider', cardMcp: 'MCP',
+      cardSessions: '会话', cardLevel: '当前档位', cardPending: '待确认', cardBackups: '备份',
+      cardConflicts: '被接管的商店插件', cardAgent: 'agent 插件',
+      agentOn: '已启用', agentOff: '未启用', agentMissing: '未安装',
+      legendAccess: '会话名单（允许名单留空 = 放行所有；黑名单优先）',
+      legendMaster: '总闸',
+      allow: '允许名单 allow_sessions', allowHint: '每行一个会话 ID，如 qq:gm:123456；留空=放行所有',
+      deny: '禁止名单 deny_sessions', denyHint: '命中直接拒绝，优先级最高',
+      readonly: '只读名单 readonly_sessions', readonlyHint: '名单内会话只能读，写操作一律拒绝',
+      enabled: '启用插件', panicLock: '全锁（紧急只读）',
+      legendRisk: '风险分级',
+      level: '能力档位', levelHint: 'readonly=只读；standard=常规（默认）；dangerous=高危需确认；full=全开',
+      highActions: '高危动作清单', highActionsHint: '每行一个动作键，如 plugin.uninstall',
+      highSessions: '高危会话名单（必填，不继承）',
+      highSessionsHint: '只有名单内的会话能执行高危动作；留空 = 无人可执行（安全默认）',
+      requireConfirm: '高危动作需确认令牌', confirmTtl: '确认令牌有效期（秒）', default300: '默认 300',
+      legendControl: '重启与关机（默认双关，互不牵连）',
+      allowRestart: '允许重启 KiraAI', allowShutdown: '允许关闭 KiraAI',
+      controlHint: '仍需 full 档位 + 确认令牌',
+      legendProtected: '数据保护（任何域都绕不过）',
+      readMask: '读取打码字段关键词', writeDeny: '禁止写入字段关键词', writeAllow: '允许写入字段白名单',
+      pathRead: '禁止读取路径', pathWrite: '禁止写入路径', pathDelete: '禁止删除路径',
+      personaWrite: '允许修改人设',
+      legendBackup: '备份与审计',
+      backupEnabled: '启用自动备份', keepLast: '每目标保留份数', maxAge: '最长保留天数',
+      maxTotal: '总大小上限（MB）', cleanupOnStart: '启动时清理旧备份',
+      auditEnabled: '启用审计', auditReads: '记录读取操作', auditMaxAge: '审计保留天数',
+      legendStore: '插件商店',
+      takeover: '接管插件商店（互斥，检测到原插件即关闭它）',
+      storeUrl: '商店数据源URL', ghProxy: 'GitHub 加速代理（留空自动测速）',
+      timeout: '请求超时（秒）', cacheTtl: '列表缓存秒数', maxResults: '单次搜索结果上限',
+      legendBackups: '自动备份（写动作前的快照）',
+      thId: '回滚点', thCreated: '时间', thLabel: '目标', thFiles: '文件', thAction: '',
+      rollback: '回滚', rollbackForce: '强制', noBackups: '暂无备份',
+      foreign: '其它实例', foreignHint: '这个回滚点来自另一个 KiraAI 实例（随文件夹一起复制过来的），本实例不会去写别人的目录',
+      confirmRestore: '确定要恢复 ', confirmRestore2: ' 吗？',
+      restored: '已回滚', restoreFailed: '回滚失败: ', needForce: '目标已被外部改动，勾选“强制”再试',
+      readBackupsFailed: '读取备份失败: ',
+      legendAudit: '审计（最近记录）',
+      thTime: '时间', thDomain: '域', thOp: '动作', thOk: '结果', thNote: '说明',
+      noAudit: '暂无记录', readAuditFailed: '读取审计失败: ',
+      panicOn: '已全锁（只读）', panicOff: '已解除全锁'
+    },
+    en: {
+      brand: 'Kira Ops Console',
+      reload: 'Reload',
+      panic: 'Lock / Unlock',
+      save: 'Save all settings (hot reload)',
+      saving: 'Saving…',
+      saved: 'Saved and applied',
+      saveFailed: 'Save failed: ',
+      loadFailed: 'Load failed: ',
+      reloaded: 'Reloaded',
+      lang: '中',
+      tabAccess: 'Access', tabRisk: 'Risk', tabControl: 'Restart', tabProtected: 'Protection',
+      tabBackup: 'Backups', tabAudit: 'Audit', tabStore: 'Store',
+      cardPlugins: 'Plugins', cardSkills: 'Skills', cardProviders: 'Providers', cardMcp: 'MCP',
+      cardSessions: 'Sessions', cardLevel: 'Level', cardPending: 'Pending', cardBackups: 'Backups',
+      cardConflicts: 'Absorbed store plugin', cardAgent: 'agent plugin',
+      agentOn: 'enabled', agentOff: 'disabled', agentMissing: 'not installed',
+      legendAccess: 'Session lists (empty allow list = everyone; deny wins)',
+      legendMaster: 'Master switch',
+      allow: 'Allow list (allow_sessions)', allowHint: 'One session id per line, e.g. qq:gm:123456; empty = all',
+      deny: 'Deny list (deny_sessions)', denyHint: 'Matched requests are refused first',
+      readonly: 'Read-only list (readonly_sessions)', readonlyHint: 'These sessions may read but never write',
+      enabled: 'Plugin enabled', panicLock: 'Panic lock (read-only)',
+      legendRisk: 'Risk ladder',
+      level: 'Capability level', levelHint: 'readonly / standard (default) / dangerous (confirm) / full',
+      highActions: 'High-risk actions', highActionsHint: 'One action key per line, e.g. plugin.uninstall',
+      highSessions: 'High-risk sessions (required, not inherited)',
+      highSessionsHint: 'Only these sessions may run high-risk actions; empty = nobody (safe default)',
+      requireConfirm: 'High-risk actions need a confirm token', confirmTtl: 'Confirm token TTL (seconds)',
+      default300: 'default 300',
+      legendControl: 'Restart and shutdown (both off by default, independent)',
+      allowRestart: 'Allow restarting KiraAI', allowShutdown: 'Allow shutting down KiraAI',
+      controlHint: 'also needs level=full + a confirm token',
+      legendProtected: 'Data protection (applies to every domain)',
+      readMask: 'Masked-on-read keywords', writeDeny: 'Write-denied keywords', writeAllow: 'Write allow list',
+      pathRead: 'Read-denied paths', pathWrite: 'Write-denied paths', pathDelete: 'Delete-denied paths',
+      personaWrite: 'Allow persona edits',
+      legendBackup: 'Backups and audit',
+      backupEnabled: 'Automatic backups', keepLast: 'Snapshots kept per target', maxAge: 'Max age (days)',
+      maxTotal: 'Total size cap (MB)', cleanupOnStart: 'Clean up on startup',
+      auditEnabled: 'Audit enabled', auditReads: 'Also record reads', auditMaxAge: 'Audit retention (days)',
+      legendStore: 'Plugin store',
+      takeover: 'Absorb the standalone store plugin (disable it, never uninstall)',
+      storeUrl: 'Store feed URL', ghProxy: 'GitHub mirror (empty = auto speed test)',
+      timeout: 'Request timeout (s)', cacheTtl: 'Listing cache (s)', maxResults: 'Max search results',
+      legendBackups: 'Automatic backups (snapshot taken before every write)',
+      thId: 'Rollback point', thCreated: 'Created', thLabel: 'Target', thFiles: 'Files', thAction: '',
+      rollback: 'Restore', rollbackForce: 'force', noBackups: 'No backups yet',
+      foreign: 'other instance', foreignHint: 'This rollback point was copied over from another KiraAI instance; this instance will not write outside its own tree',
+      confirmRestore: 'Restore ', confirmRestore2: '?',
+      restored: 'Restored', restoreFailed: 'Restore failed: ',
+      needForce: 'Target changed outside kira_ops - tick "force" and retry',
+      readBackupsFailed: 'Could not read backups: ',
+      legendAudit: 'Audit (latest records)',
+      thTime: 'Time', thDomain: 'Domain', thOp: 'Action', thOk: 'OK', thNote: 'Note',
+      noAudit: 'No records yet', readAuditFailed: 'Could not read audit: ',
+      panicOn: 'Panic lock engaged (read-only)', panicOff: 'Panic lock released'
+    }
+  }
+
+  var lang = 'zh'
   var ctx = null
   var cfg = {}
   var warnings = []
+  var overview = {}
+
+  function t(key) {
+    var table = STR[lang] || STR.zh
+    if (table[key] !== undefined) return table[key]
+    return STR.zh[key] !== undefined ? STR.zh[key] : key
+  }
 
   function $(sel) { return document.querySelector(sel) }
   function el(tag, cls, html) {
@@ -22,8 +146,8 @@
   function api(path, body) {
     var base = '/api/plugin/kira_ops' + path
     var headers = { 'Content-Type': 'application/json' }
-    var t = token()
-    if (t) headers['Authorization'] = 'Bearer ' + t
+    var tk = token()
+    if (tk) headers['Authorization'] = 'Bearer ' + tk
     return fetch(base, {
       method: body === undefined ? 'GET' : 'POST',
       credentials: 'same-origin',
@@ -36,11 +160,11 @@
     })
   }
   function toast(msg) {
-    var t = $('#toast')
-    t.textContent = msg
-    t.classList.remove('hide')
+    var box = $('#toast')
+    box.textContent = msg
+    box.classList.remove('hide')
     clearTimeout(toast._h)
-    toast._h = setTimeout(function () { t.classList.add('hide') }, 2600)
+    toast._h = setTimeout(function () { box.classList.add('hide') }, 2600)
   }
 
   // ---------------------------------------------------------------
@@ -129,11 +253,18 @@
       var path = n.dataset.path
       var kind = n.dataset.kind
       var value
+      var usable = true
       if (kind === 'switch') value = !!n.checked
-      else if (kind === 'number') value = n.value === '' ? 0 : Number(n.value)
+      else if (kind === 'number') {
+        // an empty or non-numeric box means "leave the setting alone": writing 0
+        // there would silently reset it to the default
+        var num = Number(n.value)
+        if (n.value === '' || !isFinite(num)) usable = false
+        else value = num
+      }
       else if (kind === 'list') value = n.value.split('\n').map(function (s) { return s.trim() }).filter(Boolean)
       else value = n.value
-      setPath(patch, path, value)
+      if (usable) setPath(patch, path, value)
     })
     return patch
   }
@@ -142,6 +273,21 @@
   // render
   // ---------------------------------------------------------------
 
+  function renderChrome() {
+    document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en'
+    document.title = t('brand')
+    $('#brandText').textContent = t('brand')
+    $('#btnReload').textContent = t('reload')
+    $('#btnPanic').textContent = t('panic')
+    $('#btnLang').textContent = t('lang')
+    $('#btnSave').textContent = t('save')
+    var labels = [t('tabAccess'), t('tabRisk'), t('tabControl'), t('tabProtected'),
+                  t('tabBackup'), t('tabAudit'), t('tabStore')]
+    document.querySelectorAll('.tab').forEach(function (tab, i) {
+      if (labels[i]) tab.textContent = labels[i]
+    })
+  }
+
   function renderWarnings() {
     var box = $('#warnings')
     if (!warnings || !warnings.length) { box.classList.add('hide'); return }
@@ -149,20 +295,23 @@
     box.innerHTML = warnings.map(function (w) { return '⚠ ' + w }).join('<br>')
   }
 
-  function renderCards(overview) {
+  function renderCards() {
     var box = $('#cards')
     box.innerHTML = ''
     var counts = overview.counts || {}
     var perm = overview.permission || {}
+    var agent = overview.agent || {}
+    var agentText = !agent.installed ? t('agentMissing') : (agent.enabled ? t('agentOn') : t('agentOff'))
     var rows = [
-      ['插件', (counts.plugins_enabled || 0) + '/' + (counts.plugins || 0)],
-      ['技能', counts.skills || 0],
-      ['Provider', counts.providers || 0],
-      ['MCP', counts.mcp || 0],
-      ['会话', counts.sessions || 0],
-      ['当前档位', perm.level || '-'],
-      ['待确认', counts.pending_confirms || 0],
-      ['备份', counts.backups || 0]
+      [t('cardPlugins'), (counts.plugins_enabled || 0) + '/' + (counts.plugins || 0)],
+      [t('cardSkills'), counts.skills || 0],
+      [t('cardProviders'), counts.providers || 0],
+      [t('cardMcp'), counts.mcp || 0],
+      [t('cardSessions'), counts.sessions || 0],
+      [t('cardLevel'), perm.level || '-'],
+      [t('cardPending'), counts.pending_confirms || 0],
+      [t('cardBackups'), counts.backups || 0],
+      [t('cardAgent'), agentText]
     ]
     rows.forEach(function (r) {
       var c = el('div', 'card')
@@ -173,7 +322,7 @@
     if (overview.conflicts && overview.conflicts.length) {
       var c2 = el('div', 'card')
       c2.appendChild(el('b', '', String(overview.conflicts.length)))
-      c2.appendChild(el('span', '', '被接管的商店插件'))
+      c2.appendChild(el('span', '', t('cardConflicts')))
       box.appendChild(c2)
     }
   }
@@ -182,16 +331,16 @@
     var pane = $('#pane-access')
     pane.innerHTML = ''
     var fs = el('fieldset')
-    fs.appendChild(el('legend', '', '会话名单（允许名单留空 = 放行所有；黑名单优先）'))
-    fs.appendChild(fieldList('access.allow_sessions', '允许名单 allow_sessions', '每行一个会话 ID，如 qq:gm:123456；留空=放行所有'))
-    fs.appendChild(fieldList('access.deny_sessions', '禁止名单 deny_sessions', '命中直接拒绝，优先级最高'))
-    fs.appendChild(fieldList('access.readonly_sessions', '只读名单 readonly_sessions', '名单内会话只能读，写操作一律拒绝'))
+    fs.appendChild(el('legend', '', t('legendAccess')))
+    fs.appendChild(fieldList('access.allow_sessions', t('allow'), t('allowHint')))
+    fs.appendChild(fieldList('access.deny_sessions', t('deny'), t('denyHint')))
+    fs.appendChild(fieldList('access.readonly_sessions', t('readonly'), t('readonlyHint')))
     pane.appendChild(fs)
 
     var fs2 = el('fieldset')
-    fs2.appendChild(el('legend', '', '总闸'))
-    fs2.appendChild(fieldSwitch('master.enabled', '启用插件'))
-    fs2.appendChild(fieldSwitch('master.panic_lock', '全锁（紧急只读）'))
+    fs2.appendChild(el('legend', '', t('legendMaster')))
+    fs2.appendChild(fieldSwitch('master.enabled', t('enabled')))
+    fs2.appendChild(fieldSwitch('master.panic_lock', t('panicLock')))
     pane.appendChild(fs2)
   }
 
@@ -199,14 +348,13 @@
     var pane = $('#pane-risk')
     pane.innerHTML = ''
     var fs = el('fieldset')
-    fs.appendChild(el('legend', '', '风险分级'))
-    fs.appendChild(fieldSelect('risk.level', '能力档位', ['readonly', 'standard', 'dangerous', 'full'],
-      'readonly=只读；standard=常规（默认）；dangerous=高危需确认；full=全开'))
-    fs.appendChild(fieldList('risk.high_risk_actions', '高危动作清单', '每行一个动作键，如 plugin.uninstall'))
-    fs.appendChild(fieldList('risk.high_risk_sessions', '高危会话名单（必填，不继承）',
-      '只有名单内的会话能执行高危动作；留空 = 无人可执行（安全默认）'))
-    fs.appendChild(fieldSwitch('risk.require_confirm', '高危动作需确认令牌'))
-    fs.appendChild(fieldText('risk.confirm_ttl', '确认令牌有效期（秒）', '默认 300', 'number'))
+    fs.appendChild(el('legend', '', t('legendRisk')))
+    fs.appendChild(fieldSelect('risk.level', t('level'),
+      ['readonly', 'standard', 'dangerous', 'full'], t('levelHint')))
+    fs.appendChild(fieldList('risk.high_risk_actions', t('highActions'), t('highActionsHint')))
+    fs.appendChild(fieldList('risk.high_risk_sessions', t('highSessions'), t('highSessionsHint')))
+    fs.appendChild(fieldSwitch('risk.require_confirm', t('requireConfirm')))
+    fs.appendChild(fieldText('risk.confirm_ttl', t('confirmTtl'), t('default300'), 'number'))
     pane.appendChild(fs)
   }
 
@@ -214,9 +362,9 @@
     var pane = $('#pane-control')
     pane.innerHTML = ''
     var fs = el('fieldset')
-    fs.appendChild(el('legend', '', '重启与关机（默认双关，互不牵连）'))
-    fs.appendChild(fieldSwitch('control.allow_restart', '允许重启 KiraAI', '仍需 full 档位 + 确认令牌'))
-    fs.appendChild(fieldSwitch('control.allow_shutdown', '允许关闭 KiraAI', '仍需 full 档位 + 确认令牌'))
+    fs.appendChild(el('legend', '', t('legendControl')))
+    fs.appendChild(fieldSwitch('control.allow_restart', t('allowRestart'), t('controlHint')))
+    fs.appendChild(fieldSwitch('control.allow_shutdown', t('allowShutdown'), t('controlHint')))
     pane.appendChild(fs)
   }
 
@@ -224,26 +372,26 @@
     var pane = $('#pane-protected')
     pane.innerHTML = ''
     var fs = el('fieldset')
-    fs.appendChild(el('legend', '', '数据保护（任何域都绕不过）'))
-    fs.appendChild(fieldList('protected.read_mask', '读取打码字段关键词'))
-    fs.appendChild(fieldList('protected.write_deny', '禁止写入字段关键词'))
-    fs.appendChild(fieldList('protected.write_allow', '允许写入字段白名单'))
-    fs.appendChild(fieldList('protected.path_deny_read', '禁止读取路径'))
-    fs.appendChild(fieldList('protected.path_deny_write', '禁止写入路径'))
-    fs.appendChild(fieldList('protected.path_deny_delete', '禁止删除路径'))
-    fs.appendChild(fieldSwitch('protected.persona_write', '允许修改人设'))
+    fs.appendChild(el('legend', '', t('legendProtected')))
+    fs.appendChild(fieldList('protected.read_mask', t('readMask')))
+    fs.appendChild(fieldList('protected.write_deny', t('writeDeny')))
+    fs.appendChild(fieldList('protected.write_allow', t('writeAllow')))
+    fs.appendChild(fieldList('protected.path_deny_read', t('pathRead')))
+    fs.appendChild(fieldList('protected.path_deny_write', t('pathWrite')))
+    fs.appendChild(fieldList('protected.path_deny_delete', t('pathDelete')))
+    fs.appendChild(fieldSwitch('protected.persona_write', t('personaWrite')))
     pane.appendChild(fs)
 
     var fs2 = el('fieldset')
-    fs2.appendChild(el('legend', '', '备份与审计'))
-    fs2.appendChild(fieldSwitch('backup.enabled', '启用自动备份'))
-    fs2.appendChild(fieldText('backup.keep_last', '每目标保留份数', '', 'number'))
-    fs2.appendChild(fieldText('backup.max_age_days', '最长保留天数', '', 'number'))
-    fs2.appendChild(fieldText('backup.max_total_mb', '总大小上限（MB）', '', 'number'))
-    fs2.appendChild(fieldSwitch('backup.cleanup_on_start', '启动时清理旧备份'))
-    fs2.appendChild(fieldSwitch('audit.enabled', '启用审计'))
-    fs2.appendChild(fieldSwitch('audit.audit_reads', '记录读取操作'))
-    fs2.appendChild(fieldText('audit.max_age_days', '审计保留天数', '', 'number'))
+    fs2.appendChild(el('legend', '', t('legendBackup')))
+    fs2.appendChild(fieldSwitch('backup.enabled', t('backupEnabled')))
+    fs2.appendChild(fieldText('backup.keep_last', t('keepLast'), '', 'number'))
+    fs2.appendChild(fieldText('backup.max_age_days', t('maxAge'), '', 'number'))
+    fs2.appendChild(fieldText('backup.max_total_mb', t('maxTotal'), '', 'number'))
+    fs2.appendChild(fieldSwitch('backup.cleanup_on_start', t('cleanupOnStart')))
+    fs2.appendChild(fieldSwitch('audit.enabled', t('auditEnabled')))
+    fs2.appendChild(fieldSwitch('audit.audit_reads', t('auditReads')))
+    fs2.appendChild(fieldText('audit.max_age_days', t('auditMaxAge'), '', 'number'))
     pane.appendChild(fs2)
   }
 
@@ -251,13 +399,13 @@
     var pane = $('#pane-store')
     pane.innerHTML = ''
     var fs = el('fieldset')
-    fs.appendChild(el('legend', '', '插件商店'))
-    fs.appendChild(fieldSwitch('store.takeover_store', '接管插件商店（互斥，检测到原插件即关闭它）'))
-    fs.appendChild(fieldText('store.store_url', '商店数据源URL'))
-    fs.appendChild(fieldText('store.github_proxy', 'GitHub 加速代理（留空自动测速）'))
-    fs.appendChild(fieldText('store.request_timeout', '请求超时（秒）', '', 'number'))
-    fs.appendChild(fieldText('store.cache_ttl', '列表缓存秒数', '', 'number'))
-    fs.appendChild(fieldText('store.max_results', '单次搜索结果上限', '', 'number'))
+    fs.appendChild(el('legend', '', t('legendStore')))
+    fs.appendChild(fieldSwitch('store.takeover_store', t('takeover')))
+    fs.appendChild(fieldText('store.store_url', t('storeUrl')))
+    fs.appendChild(fieldText('store.github_proxy', t('ghProxy')))
+    fs.appendChild(fieldText('store.request_timeout', t('timeout'), '', 'number'))
+    fs.appendChild(fieldText('store.cache_ttl', t('cacheTtl'), '', 'number'))
+    fs.appendChild(fieldText('store.max_results', t('maxResults'), '', 'number'))
     pane.appendChild(fs)
   }
 
@@ -265,9 +413,10 @@
     var pane = $('#pane-backup')
     pane.innerHTML = ''
     var fs = el('fieldset')
-    fs.appendChild(el('legend', '', '自动备份（写动作前的快照）'))
+    fs.appendChild(el('legend', '', t('legendBackups')))
     var table = el('table')
-    table.innerHTML = '<thead><tr><th>回滚点</th><th>时间</th><th>目标</th><th>文件</th><th></th></tr></thead>'
+    table.innerHTML = '<thead><tr><th>' + t('thId') + '</th><th>' + t('thCreated') + '</th><th>' +
+      t('thLabel') + '</th><th>' + t('thFiles') + '</th><th>' + t('thAction') + '</th></tr></thead>'
     var tbody = el('tbody')
     table.appendChild(tbody)
     fs.appendChild(table)
@@ -275,33 +424,46 @@
     api('/backups').then(function (res) {
       (res.items || []).forEach(function (b) {
         var tr = el('tr')
+        var label = (b.label || '') + (b.foreign ? ' ⚠ ' + t('foreign') : '')
         tr.innerHTML = '<td>' + b.id + '</td><td>' + (b.created || '') + '</td><td>' +
-          (b.label || '') + '</td><td>' + (b.files || 0) + '</td>'
+          label + '</td><td>' + (b.files || 0) + '</td>'
+        if (b.foreign) tr.title = t('foreignHint')
         var td = el('td')
-        var btn = el('button', 'ghost', '回滚')
+        var forceWrap = el('label', 'inline')
+        var force = el('input', '', '')
+        force.type = 'checkbox'
+        forceWrap.appendChild(force)
+        forceWrap.appendChild(el('span', '', t('rollbackForce')))
+        var btn = el('button', 'ghost', t('rollback'))
         btn.onclick = function () {
-          if (!confirm('确定要恢复 ' + b.id + ' 吗？')) return
-          api('/backups/restore', { id: b.id }).then(function (r) {
-            toast(r.ok ? '已回滚' : ('回滚失败: ' + (r.error || '需要 force')))
+          if (!confirm(t('confirmRestore') + b.id + t('confirmRestore2'))) return
+          api('/backups/restore', { id: b.id, force: !!force.checked }).then(function (r) {
+            if (r.ok) { toast(t('restored')); return }
+            if (r.need_force) { toast(t('needForce')); return }
+            var detail = r.error || (r.errors || []).join('; ') ||
+              (r.foreign || []).join('; ') || r.hint || ''
+            toast(t('restoreFailed') + detail)
           })
         }
+        td.appendChild(forceWrap)
         td.appendChild(btn)
         tr.appendChild(td)
         tbody.appendChild(tr)
       })
       if (!tbody.children.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="muted">暂无备份</td></tr>'
+        tbody.innerHTML = '<tr><td colspan="5" class="muted">' + t('noBackups') + '</td></tr>'
       }
-    }).catch(function (e) { toast('读取备份失败: ' + e.message) })
+    }).catch(function (e) { toast(t('readBackupsFailed') + e.message) })
   }
 
   function renderAudit() {
     var pane = $('#pane-audit')
     pane.innerHTML = ''
     var fs = el('fieldset')
-    fs.appendChild(el('legend', '', '审计（最近记录）'))
+    fs.appendChild(el('legend', '', t('legendAudit')))
     var table = el('table')
-    table.innerHTML = '<thead><tr><th>时间</th><th>域</th><th>动作</th><th>结果</th><th>说明</th></tr></thead>'
+    table.innerHTML = '<thead><tr><th>' + t('thTime') + '</th><th>' + t('thDomain') + '</th><th>' +
+      t('thOp') + '</th><th>' + t('thOk') + '</th><th>' + t('thNote') + '</th></tr></thead>'
     var tbody = el('tbody')
     table.appendChild(tbody)
     fs.appendChild(table)
@@ -315,19 +477,15 @@
         tbody.appendChild(tr)
       })
       if (!tbody.children.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="muted">暂无记录</td></tr>'
+        tbody.innerHTML = '<tr><td colspan="5" class="muted">' + t('noAudit') + '</td></tr>'
       }
-    }).catch(function (e) { toast('读取审计失败: ' + e.message) })
+    }).catch(function (e) { toast(t('readAuditFailed') + e.message) })
   }
 
-  async function load() {
-    var overview = await api('/overview')
-    var conf = await api('/config')
-    cfg = conf.config || {}
-    warnings = (conf.warnings || []).concat(overview.warnings || [])
-    $('#ver').textContent = overview.version ? ('v' + overview.version) : ''
+  function render() {
+    renderChrome()
     renderWarnings()
-    renderCards(overview)
+    renderCards()
     renderAccess()
     renderRisk()
     renderControl()
@@ -337,23 +495,45 @@
     renderAudit()
   }
 
+  async function load() {
+    overview = await api('/overview')
+    if (overview.lang) lang = overview.lang
+    var conf = await api('/config')
+    cfg = conf.config || {}
+    // /config and /overview both carry the standing warnings - show each once
+    var seen = {}
+    warnings = (conf.warnings || []).concat(overview.warnings || []).filter(function (w) {
+      if (seen[w]) return false
+      seen[w] = true
+      return true
+    })
+    $('#ver').textContent = overview.version ? ('v' + overview.version) : ''
+    render()
+  }
+
   function save() {
     var patch = collect()
+    $('#btnSave').textContent = t('saving')
     api('/config', { config: patch }).then(function (r) {
+      $('#btnSave').textContent = t('save')
       if (r.ok) {
-        toast('已保存并热生效')
+        toast(t('saved'))
         cfg = r.config || cfg
+        load().catch(function () { /* keep the toast, the next reload will retry */ })
       } else {
-        toast('保存失败: ' + (r.error || '未知错误'))
+        toast(t('saveFailed') + (r.error || ''))
       }
-    }).catch(function (e) { toast('保存失败: ' + e.message) })
+    }).catch(function (e) {
+      $('#btnSave').textContent = t('save')
+      toast(t('saveFailed') + e.message)
+    })
   }
 
   function panicToggle() {
     var locked = !!getPath(cfg, 'master.panic_lock')
     api('/panic', { lock: !locked }).then(function (r) {
       if (r.ok) {
-        toast(r.panic_lock ? '已全锁（只读）' : '已解除全锁')
+        toast(r.panic_lock ? t('panicOn') : t('panicOff'))
         setPath(cfg, 'master.panic_lock', r.panic_lock)
         load()
       }
@@ -363,7 +543,7 @@
   document.addEventListener('DOMContentLoaded', function () {
     document.querySelectorAll('.tab').forEach(function (tab) {
       tab.onclick = function () {
-        document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active') })
+        document.querySelectorAll('.tab').forEach(function (x) { x.classList.remove('active') })
         document.querySelectorAll('.pane').forEach(function (p) { p.classList.remove('active') })
         tab.classList.add('active')
         var pane = $('#pane-' + tab.dataset.tab)
@@ -371,8 +551,9 @@
       }
     })
     $('#btnSave').onclick = save
-    $('#btnReload').onclick = function () { load().then(function () { toast('已重载') }) }
+    $('#btnReload').onclick = function () { load().then(function () { toast(t('reloaded')) }) }
     $('#btnPanic').onclick = panicToggle
-    load().catch(function (e) { toast('加载失败: ' + e.message) })
+    $('#btnLang').onclick = function () { lang = (lang === 'zh' ? 'en' : 'zh'); render() }
+    load().catch(function (e) { toast(t('loadFailed') + e.message) })
   })
 })()

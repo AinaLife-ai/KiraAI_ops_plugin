@@ -1,4 +1,4 @@
-"""Kira Ops Console - runtime control console for KiraAI (v1.0.0).
+"""Kira Ops Console - runtime control console for KiraAI (v1.1.0).
 
 A small, merged tool surface (ops_status / ops_read / ops_config /
 ops_action / ops_store / ops_confirm / ops_panic) backed by:
@@ -7,11 +7,16 @@ ops_action / ops_store / ops_confirm / ops_panic) backed by:
     blacklist first, read-only list) plus a risk ladder and a mandatory
     high-risk session list;
   * automatic pre-write backups with retention and restore;
-  * a JSONL audit trail;
+  * a JSONL audit trail that records rejections as well as writes;
   * a capability registry (caps/) that keeps the tool surface constant
-    while domains grow;
+    while domains grow - extensible at runtime through the
+    ``kira_ops.register_capability`` custom event;
   * a WebUI panel where every setting is hot-editable and takes effect
     without a restart;
+  * plugin install/update delegated to the framework installer
+    (core.plugin.plugin_installer: size / entry-count / compression-ratio /
+    zip-slip guards) plus the reload step multi-file plugins need, with a
+    directory-level rollback when an update fails;
   * mutual exclusion with the standalone plugin store plugin.
 
 All paths are resolved from the framework (get_data_path / get_root_path);
@@ -22,10 +27,13 @@ deployment.
 from __future__ import annotations
 
 import asyncio
+import functools
+import json
 import time
 from pathlib import Path
 
 from core.plugin import BasePlugin, PageMenu, PluginPage, Priority, logger, on, register
+from core.chat import Session
 from core.chat.message_utils import KiraMessageBatchEvent
 from core.provider import LLMRequest
 from core.utils.path_utils import get_config_path, get_data_path
@@ -37,7 +45,11 @@ from .core.backup import BackupManager
 from .core.confirm import ConfirmPool
 from .core.permission import PermissionEngine
 from .store import StoreClient, PLUGIN_ID_RE
-from .store.installer import install_plugin_dir, install_skill_dir
+from .store.installer import (
+    install_plugin_from_direct_url,
+    install_plugin_from_repo,
+    install_skill_from_zip_bytes,
+)
 from core.prompt_manager import Prompt
 
 # Plugins whose functionality kira_ops fully absorbs. When they are enabled,
@@ -57,6 +69,44 @@ TARGET_ALIASES = {
 }
 
 
+class Payload(dict):
+    """Tool-result dict that renders as compact JSON.
+
+    The framework builds the tool message with ``ToolResult(str(result))``, so a
+    plain dict would reach the model as a Python repr (``{'ok': True, ...}``,
+    with spaces after ':' and ','). Rendering compact JSON instead is ~7%
+    smaller and hands the model valid JSON (``true`` / ``null`` rather than
+    ``True`` / ``None``). It is still a dict everywhere else, so internal
+    callers and tests keep using ``result["ok"]``.
+    """
+
+    def __str__(self):
+        try:
+            return json.dumps(self, ensure_ascii=False, separators=(",", ":"), default=str)
+        except Exception:
+            return super().__str__()
+
+
+TOOL_METHODS = ("ops_status", "ops_read", "ops_config", "ops_action",
+                "ops_store", "ops_confirm", "ops_panic")
+
+
+def wrap_tool_results(cls):
+    """Wrap every @register.tool method so its result renders as compact JSON."""
+    for name in TOOL_METHODS:
+        original = cls.__dict__.get(name)
+        if original is None or getattr(original, "_kira_ops_rendered", False):
+            continue
+
+        @functools.wraps(original)
+        async def wrapper(self, *args, __original=original, **kwargs):
+            return Payload(await __original(self, *args, **kwargs) or {})
+
+        wrapper._kira_ops_rendered = True
+        setattr(cls, name, wrapper)
+    return cls
+
+
 class KiraOpsPlugin(BasePlugin):
     plugin_id = "kira_ops"
 
@@ -72,6 +122,9 @@ class KiraOpsPlugin(BasePlugin):
         self.store = StoreClient(self.store_cfg)
         self.tasks: set = set()
         self.warnings: list = []
+        self._lifecycle_cache = None
+        self._lifecycle_warned = False
+        self._warned_keys: set = set()
 
         load_all()
         self.caps = {name: cls(self) for name, cls in caps_pkg.REGISTRY.items()}
@@ -107,19 +160,54 @@ class KiraOpsPlugin(BasePlugin):
 
     @property
     def lifecycle(self):
-        """Best-effort lookup of the running KiraLifecycle instance."""
-        if getattr(self, "_lifecycle_cache", None) is not None:
-            return self._lifecycle_cache
+        """Best-effort handle on the running KiraLifecycle instance.
+
+        The framework hangs the WebUI app off the lifecycle
+        (``lifecycle.webui_app``) but publishes no reverse link, so a plugin
+        cannot obtain the lifecycle through the public context. Resolution
+        order, most stable first:
+
+          1. ``app.state.lifecycle`` - used if a future core sets it;
+          2. the WebUI route handlers, which all keep the instance on self;
+          3. the running ``init_and_run_system`` task frame;
+          4. a gc sweep as the last resort.
+
+        The result is cached; when every path fails a warning is logged once
+        so the reason control.restart/shutdown refuses to run is visible.
+        """
+        cached = getattr(self, "_lifecycle_cache", None)
+        if cached is not None:
+            return cached
         found = None
         pm = getattr(self.ctx, "plugin_mgr", None)
         app = getattr(pm, "_web_app", None)
         if app is not None:
             found = getattr(app.state, "lifecycle", None)
+            if found is None:
+                found = self._scan_web_routes_for_lifecycle(app)
         if found is None:
             found = self._scan_tasks_for_lifecycle()
         if found is not None:
             self._lifecycle_cache = found
+        elif not getattr(self, "_lifecycle_warned", False):
+            self._lifecycle_warned = True
+            logger.warning(
+                "[kira_ops] KiraLifecycle handle not found; "
+                "control.restart / control.shutdown will refuse to run")
         return found
+
+    @staticmethod
+    def _scan_web_routes_for_lifecycle(app):
+        """Every WebUI route object holds the lifecycle instance on self."""
+        try:
+            for route in getattr(app, "routes", []) or []:
+                holder = getattr(getattr(route, "endpoint", None), "__self__", None)
+                candidate = getattr(holder, "lifecycle", None)
+                if candidate is not None and candidate.__class__.__name__ == "KiraLifecycle":
+                    return candidate
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _scan_tasks_for_lifecycle():
@@ -148,6 +236,39 @@ class KiraOpsPlugin(BasePlugin):
 
     def log(self, message: str):
         logger.info(f"[kira_ops] {message}")
+
+    def session_inventory(self) -> tuple:
+        """List sessions, tolerating malformed keys in chat_memory.
+
+        ``SessionManager.get_session_info()`` (no argument) splits every key on
+        ':' and indexes part 2, so a single junk key - e.g. one written by an
+        older build with a bogus session id - makes it raise IndexError for
+        *everyone*, including the builtin session tools. Fall back to the raw
+        store instead of failing the whole session domain, and report the bad
+        keys so they can be cleaned up.
+        """
+        sm = getattr(self.ctx, "session_mgr", None)
+        if sm is None:
+            return [], []
+        try:
+            return list(sm.get_session_info() or []), []
+        except Exception as exc:
+            logger.warning(f"[kira_ops] session enumeration failed ({exc}); using raw keys")
+        raw = getattr(sm, "chat_memory", None)
+        if not isinstance(raw, dict):
+            return [], []
+        sessions, skipped = [], []
+        for sid in list(raw.keys()):
+            parts = str(sid).split(":", 2)
+            if len(parts) < 3 or not parts[0] or not parts[1] or not parts[2]:
+                skipped.append(str(sid))
+                continue
+            data = raw.get(sid) or {}
+            sessions.append(Session(
+                adapter_name=parts[0], session_type=parts[1], session_id=parts[2],
+                session_title=data.get("title"), session_description=data.get("description"),
+                timestamp=data.get("timestamp")))
+        return sessions, skipped
 
     def mask(self, data):
         return self.engine.mask_for_read(data)
@@ -195,6 +316,15 @@ class KiraOpsPlugin(BasePlugin):
     # ------------------------------------------------------------------
 
     async def install_from_store(self, plugin_id: str, force: bool = False) -> dict:
+        """Install or update a plugin from the store.
+
+        The download + archive handling is delegated to the framework
+        installer, which enforces the 50 MiB / 10 000 entries / 100:1 ratio /
+        512 KiB central-directory limits and the zip-slip guard. kira_ops adds
+        the reload step (``prepare_plugin_reload``) the framework's own WebUI
+        update flow also performs, plus a rollback to the previous build when
+        the new one fails to load.
+        """
         if not PLUGIN_ID_RE.match(plugin_id or ""):
             return {"ok": False, "error": f"illegal plugin id '{plugin_id}'"}
         pm = getattr(self.ctx, "plugin_mgr", None)
@@ -210,67 +340,45 @@ class KiraOpsPlugin(BasePlugin):
         if not target:
             return {"ok": False, "error": f"plugin '{plugin_id}' not found in the store"}
 
-        repo = target.get("repo") or target.get("repository") or ""
-        direct = (target.get("download_url") or target.get("zip_url")
-                  or target.get("archive_url") or "")
+        repo, direct = StoreClient.entry_links(target)
         if not repo and not direct:
             return {"ok": False, "error": f"plugin '{plugin_id}' has no repo or download url"}
-        if pm.has_plugin(plugin_id) and not force:
+
+        update = bool(pm.has_plugin(plugin_id))
+        if update and not force:
             return {"ok": False,
                     "error": f"plugin '{plugin_id}' already exists; pass force=true to overwrite"}
 
-        workspace = StoreClient.temp_workspace()
-        zip_path = workspace / "plugin.zip"
-        staging = workspace / "extract"
-        try:
-            if repo:
-                parsed = StoreClient.parse_repo(repo)
-                if not parsed:
-                    return {"ok": False, "error": f"cannot parse repo: {repo}"}
-                source = await self.store.download_github_archive(parsed[0], parsed[1], zip_path)
-            else:
-                why = StoreClient.validate_direct_url(direct)
-                if why:
-                    return {"ok": False, "error": f"direct download blocked: {why}"}
-                await self.store.download(direct, zip_path)
-                source = direct
+        snapshot = []
+        for f in (get_config_path() / "plugins" / f"{plugin_id}.json",
+                  get_config_path() / "plugins.json"):
+            if Path(f).exists():
+                snapshot.append(f)
+        label = f"store_{'update' if update else 'install'}_{plugin_id}"
+        backup = await asyncio.to_thread(self.backups.snapshot, snapshot, label, "store install")
 
-            manifest, root = StoreClient.extract_zip(zip_path, staging)
-            if manifest is None:
-                return {"ok": False, "error": "no manifest.json found inside the archive"}
-            install_id = str(manifest.get("plugin_id") or manifest.get("id") or plugin_id).strip()
-            if install_id != plugin_id and not force:
-                return {"ok": False,
-                        "error": f"store id '{plugin_id}' != manifest id '{install_id}' (force=true to override)"}
-            if not PLUGIN_ID_RE.match(install_id):
-                return {"ok": False, "error": f"illegal plugin id '{install_id}'"}
+        if repo:
+            result = await install_plugin_from_repo(
+                pm, repo, plugin_id,
+                update=update, gh_proxy=self.store.gh_proxy_argument())
+        else:
+            result = await install_plugin_from_direct_url(
+                pm, direct, plugin_id,
+                update=update, validate_url=StoreClient.validate_direct_url,
+                timeout=max(60.0, self.store.timeout))
 
-            snapshot = []
-            for f in (get_config_path() / "plugins" / f"{install_id}.json",
-                      get_config_path() / "plugins.json"):
-                if Path(f).exists():
-                    snapshot.append(f)
-            backup = self.backups.snapshot(snapshot, f"store_install_{install_id}", "store install")
-
-            await install_plugin_dir(pm, root, install_id)
+        if result.get("ok"):
             if backup.get("id"):
-                self.backups.mark_applied(backup["id"])
-            info = pm.get_plugin_info(install_id)
-            return {"ok": True,
-                    "plugin_id": install_id,
-                    "version": (getattr(info, "version", "") if info else manifest.get("version") or ""),
-                    "status": (getattr(info, "status", "") if info else "unknown"),
-                    "source": source,
-                    "backup": backup}
-        except Exception as exc:
-            logger.exception(f"[kira_ops] install failed: {exc}")
-            return {"ok": False, "error": f"install failed: {exc}"}
-        finally:
-            try:
-                import shutil
-                shutil.rmtree(workspace, ignore_errors=True)
-            except Exception:
-                pass
+                await asyncio.to_thread(self.backups.mark_applied, backup["id"])
+                result["backup"] = backup
+                result["hint"] = (f"{'updated' if update else 'installed'} from "
+                                  f"{result.get('source') or repo or direct}"
+                                  f" ｜ rollback point: backups/{backup['id']}")
+        elif backup.get("id"):
+            result["backup"] = backup
+        if not result.get("ok"):
+            logger.error(f"[kira_ops] store install of {plugin_id} failed: {result.get('error')}")
+        return result
 
     async def store_search(self, keyword: str = "", author: str = "",
                            tag: str = "", limit: int = 0) -> dict:
@@ -304,42 +412,56 @@ class KiraOpsPlugin(BasePlugin):
                 "likes": p.get("likes") or 0,
             })
         items.sort(key=lambda x: -(x.get("downloads") or 0))
-        cap = max(1, int(limit or self.store.max_results or 10))
+        cap = max(1, min(int(limit or self.store.max_results or 10), 50))
         return {"ok": True, "count": len(items), "items": items[:cap],
                 "truncated": len(items) > cap}
 
     async def install_skill_from_url(self, url: str, name: str, overwrite: bool = False) -> dict:
-        skills_root = get_data_path() / "skills"
-        workspace = StoreClient.temp_workspace("kira_ops_skill_")
-        zip_path = workspace / "skill.zip"
-        staging = workspace / "extract"
-        try:
-            if "github.com" in url:
-                parsed = StoreClient.parse_repo(url)
-                if not parsed:
-                    return {"ok": False, "error": f"cannot parse repo: {url}"}
-                await self.store.download_github_archive(parsed[0], parsed[1], zip_path)
-            else:
-                why = StoreClient.validate_direct_url(url)
-                if why:
-                    return {"ok": False, "error": f"download blocked: {why}"}
-                await self.store.download(url, zip_path)
-            _manifest, root = StoreClient.extract_zip(zip_path, staging)
-            if not (root / "SKILL.md").is_file():
-                return {"ok": False, "error": "SKILL.md was not found in the archive"}
-            target = install_skill_dir(skills_root, root, name, overwrite=overwrite)
-            sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
-            if sm:
-                sm.skills_info = sm.scan_skill_dir()
-            return {"ok": True, "name": name, "path": str(target)}
-        except Exception as exc:
-            return {"ok": False, "error": f"skill install failed: {exc}"}
-        finally:
+        """Install a skill from a GitHub repo or a direct zip URL.
+
+        The archive is validated with the same limits the framework applies to
+        plugins (size / entry count / compression ratio / zip-slip) before
+        anything is written under data/skills.
+        """
+        from core.plugin.plugin_installer import MAX_PLUGIN_ARCHIVE_BYTES
+        from core.utils.network import download_file
+
+        target_url = str(url or "").strip()
+        if "github.com" in target_url:
             try:
-                import shutil
-                shutil.rmtree(workspace, ignore_errors=True)
-            except Exception:
-                pass
+                from core.utils.github_api import parse_github_url
+                owner, repo = parse_github_url(target_url)
+            except Exception as exc:
+                return {"ok": False, "error": f"cannot parse repo: {target_url} ({exc})"}
+            target_url = f"https://github.com/{owner}/{repo}/archive/HEAD.zip"
+
+        why = StoreClient.validate_direct_url(target_url)
+        if why:
+            return {"ok": False, "error": f"download blocked: {why}"}
+
+        temp_dir = get_data_path() / "temp"
+        temp_zip = temp_dir / f"kira_ops_skill_{int(time.time())}.zip"
+        try:
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            await download_file(target_url, str(temp_zip),
+                                timeout=max(60.0, self.store.timeout),
+                                max_bytes=MAX_PLUGIN_ARCHIVE_BYTES)
+            payload = await asyncio.to_thread(temp_zip.read_bytes)
+        except Exception as exc:
+            return {"ok": False, "error": f"skill download failed: {exc!r}"}
+        finally:
+            temp_zip.unlink(missing_ok=True)
+
+        try:
+            target = await install_skill_from_zip_bytes(
+                get_data_path() / "skills", payload, name, overwrite=overwrite)
+        except Exception as exc:
+            return {"ok": False, "error": f"skill install failed: {exc!r}"}
+
+        sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
+        if sm:
+            sm.skills_info = sm.scan_skill_dir()
+        return {"ok": True, "name": name, "path": str(target)}
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -347,12 +469,20 @@ class KiraOpsPlugin(BasePlugin):
 
     async def initialize(self):
         if not bool(self.master.get("enabled", True)):
-            self.log("disabled in settings; tool surface not registered")
+            # The framework registers plugin tools right after initialize()
+            # whatever we return, so they stay in the prompt; the permission
+            # engine is what keeps them refusing everything. Disable the plugin
+            # in the plugin list to remove the tools from the prompt entirely.
+            logger.warning(
+                "[kira_ops] master.enabled=false: every read and write is refused "
+                "(the framework still registers the 7 tools; use the plugin list "
+                "to remove them from the prompt)")
             return
         if self.backups.cleanup_on_start:
-            stats = self.backups.cleanup()
-            self.audit.cleanup()
-            self.log(f"startup cleanup: backups removed={stats.get('removed', 0)}")
+            stats = await asyncio.to_thread(self.backups.cleanup)
+            removed_audit = await asyncio.to_thread(self.audit.cleanup)
+            self.log(f"startup cleanup: backups removed={stats.get('removed', 0)}, "
+                     f"audit files removed={removed_audit}")
         self._check_mandatory_settings()
         if bool(self.store_cfg.get("takeover_store", True)):
             await self._takeover_store()
@@ -366,14 +496,20 @@ class KiraOpsPlugin(BasePlugin):
         self.confirm.clear()
 
     def _check_mandatory_settings(self):
-        self.warnings = []
-        if not (self.risk.get("high_risk_sessions") or []):
-            self.warnings.append(
-                "high_risk_sessions 为空：当前没有任何会话可以执行高危动作（这是安全默认，不是故障）")
-        if not self.protected.get("persona_write", False):
-            self.warnings.append("人设当前为只读（protected.persona_write=false）")
-        for w in self.warnings:
-            logger.warning(f"[kira_ops] {w}")
+        """Recompute the standing warnings; log each distinct one only once."""
+        checks = (
+            (not (self.risk.get("high_risk_sessions") or []),
+             "高危名单为空：无人可执行高危动作（安全默认，非故障）"),
+            (not self.protected.get("persona_write", False),
+             "人设只读（protected.persona_write=false）"),
+        )
+        self.warnings = [message for active, message in checks if active]
+        for message in self.warnings:
+            if message not in self._warned_keys:
+                self._warned_keys.add(message)
+                logger.warning(f"[kira_ops] {message}")
+        for stale in [m for m in self._warned_keys if m not in self.warnings]:
+            self._warned_keys.discard(stale)
 
     async def _takeover_store(self):
         conflicts = self.conflicts()
@@ -429,6 +565,25 @@ class KiraOpsPlugin(BasePlugin):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _text(value, default: str = "") -> str:
+        """Coerce a tool argument to a clean string.
+
+        Arguments arrive straight from the model, so ``include``/``action``/
+        ``keyword`` can be an int, a bool or a dict. Fuzzing 2k hostile calls
+        produced 177 AttributeErrors from ``.split()``/``.strip()`` on such
+        values - every string parameter goes through here now.
+        """
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        return default if default else str(value).strip()
+
+    @staticmethod
     def _sid(event) -> str:
         sid = getattr(event, "sid", None)
         if sid:
@@ -454,8 +609,9 @@ class KiraOpsPlugin(BasePlugin):
         return ""
 
     @staticmethod
-    def _normalize_params(cap_name: str, params: dict, target: str = "") -> dict:
-        params = dict(params or {})
+    def _normalize_params(cap_name: str, params, target: str = "") -> dict:
+        # tool arguments come from the model: a str/list here must not raise
+        params = dict(params) if isinstance(params, dict) else {}
         if target:
             params.setdefault(TARGET_ALIASES.get(cap_name, "target"), target)
             params.setdefault("target", target)
@@ -505,10 +661,10 @@ class KiraOpsPlugin(BasePlugin):
                              sid: str, uid: str, tool: str = "ops_action") -> dict:
         backup = {}
         try:
-            files = cap.backup_files(action, params) or []
-            files = [f for f in files if Path(f).is_file()]
+            files = [f for f in (cap.backup_files(action, params) or []) if Path(f).is_file()]
             if files:
-                backup = self.backups.snapshot(files, cap.backup_label(action, params), reason=key)
+                backup = await asyncio.to_thread(
+                    self.backups.snapshot, files, cap.backup_label(action, params), key)
         except Exception as exc:
             logger.warning(f"[kira_ops] snapshot before {key} failed: {exc}")
 
@@ -524,9 +680,9 @@ class KiraOpsPlugin(BasePlugin):
         if not isinstance(result, dict):
             result = {"ok": True, "result": result}
 
-        if backup.get("id"):
+        if result.get("ok") and backup.get("id"):
             try:
-                self.backups.mark_applied(backup["id"])
+                await asyncio.to_thread(self.backups.mark_applied, backup["id"])
             except Exception:
                 pass
         if result.get("ok") and backup.get("id"):
@@ -543,9 +699,11 @@ class KiraOpsPlugin(BasePlugin):
                          backup=str(backup.get("id") or ""))
         return result
 
-    def _deny(self, tool, cap_name, action, sid, uid, reason):
-        self.audit.write(kind="write", tool=tool, domain=cap_name, action=action,
-                         sid=sid, uid=uid, ok=False, error=reason)
+    def _deny(self, tool, cap_name, action, sid, uid, reason, params=None):
+        """Record a refused request (kind='deny' is never filtered) and answer."""
+        self.audit.write(kind="deny", tool=tool, domain=cap_name, action=action,
+                         sid=sid, uid=uid, ok=False, error=reason,
+                         args=self.mask(params) if params else None)
         return {"ok": False, "error": f"permission denied: {reason}"}
 
     # ==================================================================
@@ -560,16 +718,25 @@ class KiraOpsPlugin(BasePlugin):
             "type": "object",
             "properties": {
                 "include": {"type": "string",
-                            "description": "逗号分隔的段落：resources,plugins,providers,mcp,sessions,store,audit,permission（默认 resources,plugins,providers,permission）"},
-                "detail": {"type": "string", "description": "brief（默认）或 full"}
+                            "description": "逗号分隔的段落：resources,plugins,skills,providers,mcp,sessions,store,audit,permission（默认 resources,plugins,providers,permission）"},
+                "detail": {"type": "string", "description": "brief（默认，长列表只给前几条+总数）或 full（完整明细）"}
             },
             "required": []
         }
     )
     async def ops_status(self, event: KiraMessageBatchEvent, include: str = "", detail: str = "brief"):
+        """Runtime overview.
+
+        detail=brief (default) keeps list-valued fields short; detail=full
+        returns the complete content of every requested section.
+        """
+        if not bool(self.master.get("enabled", True)):
+            return {"ok": False, "error": "kira_ops is disabled in settings"}
+        full = self._text(detail, "brief").lower() == "full"
         pm = getattr(self.ctx, "plugin_mgr", None)
-        parts = [p.strip() for p in (include or "resources,plugins,providers,permission").split(",") if p.strip()]
-        out = {"ok": True, "detail": detail}
+        include = self._text(include, "resources,plugins,providers,permission")
+        parts = [p.strip() for p in include.split(",") if p.strip()]
+        out = {"ok": True, "detail": "full" if full else "brief"}
         if "resources" in parts:
             try:
                 import psutil
@@ -600,24 +767,56 @@ class KiraOpsPlugin(BasePlugin):
             mcp = getattr(getattr(self.ctx, "message_processor", None), "mcp_manager", None)
             out["mcp"] = {"total": len(mcp.servers) if mcp else 0}
         if "sessions" in parts:
-            try:
-                sessions = self.ctx.session_mgr.get_session_info() or []
-            except Exception:
-                sessions = []
+            sessions, skipped = self.session_inventory()
             out["sessions"] = {"total": len(sessions)}
+            if skipped:
+                out["sessions"]["malformed_keys"] = len(skipped)
         if "store" in parts:
             out["store"] = {"plugin": self.plugin_id, "takeover": bool(self.store_cfg.get("takeover_store", True)),
                             "cached": self.store._cache is not None}
         if "audit" in parts:
             out["audit"] = {"files": len(self.audit.history(30)),
                             "pending_confirms": self.confirm.pending_count,
-                            "backups": len(self.backups.list(500))}
+                            "backups": self.backups.count()}
         if "permission" in parts:
             out["permission"] = self.engine.summary()
         if self.warnings:
             out["warnings"] = self.warnings
-        if pm and not pm.is_plugin_enabled("agent"):
-            out.setdefault("notes", []).append("agent 插件未启用：文件/命令能力当前不可用（本插件只托管其策略）")
+        agent_ready = bool(pm and pm.has_plugin("agent") and pm.is_plugin_enabled("agent"))
+        if not agent_ready:
+            out.setdefault("notes", []).append(
+                "agent 插件未安装或未启用：文件/命令能力当前不可用（本插件只托管其策略）")
+        if not full:
+            out = self._brief(out)
+        return out
+
+    @staticmethod
+    def _trim(value, limit: int = 5):
+        """Shrink one list-valued field instead of dropping the whole section."""
+        if isinstance(value, list) and len(value) > limit:
+            return {"count": len(value), "items": value[:limit], "truncated": True}
+        return value
+
+    @classmethod
+    def _brief(cls, payload: dict, limit: int = 5) -> dict:
+        """Shrink long lists; only advertise detail=full when something was cut."""
+        out = {}
+        trimmed = False
+        for key, value in payload.items():
+            if isinstance(value, dict):
+                section = {}
+                for sub_key, sub_value in value.items():
+                    shrunk = cls._trim(sub_value, limit)
+                    trimmed = trimmed or shrunk is not sub_value
+                    section[sub_key] = shrunk
+                out[key] = section
+            else:
+                shrunk = cls._trim(value, limit)
+                trimmed = trimmed or shrunk is not value
+                out[key] = shrunk
+        out["detail"] = "brief"
+        if trimmed:
+            out["hint"] = "长列表已裁剪，需要完整明细时传 detail=full"
         return out
 
     @register.tool(
@@ -631,7 +830,7 @@ class KiraOpsPlugin(BasePlugin):
                 "action": {"type": "string", "description": "动作，缺省为 list"},
                 "target": {"type": "string", "description": "目标对象 ID（插件ID/技能名/会话ID/ProviderID/服务器ID/人设ID/备份ID）"},
                 "keyword": {"type": "string", "description": "关键词过滤/搜索"},
-                "limit": {"type": "integer", "description": "条数上限"},
+                "limit": {"type": "integer", "description": "条数上限（list 类默认 50，上限 200）"},
                 "args": {"type": "object", "description": "附加参数（JSON 对象）"}
             },
             "required": ["domain"]
@@ -639,11 +838,14 @@ class KiraOpsPlugin(BasePlugin):
     )
     async def ops_read(self, event: KiraMessageBatchEvent, domain: str, action: str = "list",
                        target: str = "", keyword: str = "", limit: int = 0, args: dict = None):
+        domain = self._text(domain)
+        target = self._text(target)
+        keyword = self._text(keyword)
         cap = self._cap(domain)
         if cap is None:
             return {"ok": False, "error": f"unknown domain '{domain}'",
                     "domains": sorted(caps_pkg.REGISTRY.keys())}
-        act = (action or "list").strip()
+        act = self._text(action, "list")
         if act not in cap.ACTIONS:
             return {"ok": False, "error": f"unknown action '{act}' for domain '{domain}'",
                     "actions": sorted(cap.ACTIONS.keys())}
@@ -654,8 +856,8 @@ class KiraOpsPlugin(BasePlugin):
         sid = self._sid(event)
         decision = self.engine.evaluate(sid, f"{domain}.{act}", kind="read")
         if not decision.allowed:
-            return {"ok": False, "error": f"permission denied: {decision.reason}"}
-        params = dict(args or {})
+            return self._deny("ops_read", domain, act, sid, self._uid(event), decision.reason)
+        params = dict(args) if isinstance(args, dict) else {}
         if target:
             params.setdefault(TARGET_ALIASES.get(domain, "target"), target)
         if keyword:
@@ -694,6 +896,10 @@ class KiraOpsPlugin(BasePlugin):
     )
     async def ops_config(self, event: KiraMessageBatchEvent, domain: str, patch: dict,
                          target: str = "", path: str = "", confirm: str = ""):
+        domain = self._text(domain)
+        target = self._text(target)
+        path = self._text(path)
+        confirm = self._text(confirm)
         sid = self._sid(event)
         uid = self._uid(event)
         if domain == "config":
@@ -716,7 +922,7 @@ class KiraOpsPlugin(BasePlugin):
 
         decision = self.engine.evaluate(sid, key, kind="write")
         if not decision.allowed:
-            return self._deny("ops_config", cap.name, act, sid, uid, decision.reason)
+            return self._deny("ops_config", cap.name, act, sid, uid, decision.reason, params)
         pre = cap.preflight(act, params)
         if pre:
             return self._deny("ops_config", cap.name, act, sid, uid, pre)
@@ -727,17 +933,21 @@ class KiraOpsPlugin(BasePlugin):
                     sid, uid)
             ok_tok, payload = self.confirm.take(confirm, sid, uid)
             if not ok_tok:
-                return {"ok": False, "error": f"confirm token rejected: {payload}"}
+                return self._deny("ops_config", cap.name, act, sid, uid,
+                                  f"confirm token rejected: {payload}")
             params = payload.get("params") or params
         return await self._execute_write(cap, act, params, key, sid, uid, tool="ops_config")
 
     @register.tool(
         "ops_action",
-        "执行 Kira 各域动作（生命周期/写操作）。domain+action 见 describe："
-        "plugin(enable/disable/reload/install/update/uninstall)、skill(refresh/enable/disable/set_scope/remove)、"
-        "provider(add_model/update_model/delete_model/sync)、mcp(add/update/enable/disable/tool_toggle/delete)、"
-        "session(title/caps/memory_clear/delete)、persona(set_active/create/update/delete)、backup(restore)、"
-        "control(restart/shutdown)。高危动作会返回确认令牌，需再调 ops_confirm。",
+        "执行 Kira 各域动作（生命周期/写操作）。domain+action："
+        "plugin(enable/disable/reload/install/update/uninstall)、"
+        "skill(refresh/enable/disable/set_scope/install/remove)、"
+        "provider(add_model/update_model/delete_model/sync/set_provider)、"
+        "mcp(add/update/enable/disable/tool_toggle/scope/delete)、"
+        "session(title/caps/memory_clear/delete)、persona(set_active/create/update/delete)、"
+        "backup(restore)、control(restart/shutdown)。"
+        "高危动作先返回确认令牌，需再调 ops_confirm(token=...)。",
         {
             "type": "object",
             "properties": {
@@ -752,11 +962,14 @@ class KiraOpsPlugin(BasePlugin):
     )
     async def ops_action(self, event: KiraMessageBatchEvent, domain: str, action: str,
                          target: str = "", args: dict = None, confirm: str = ""):
+        domain = self._text(domain)
+        target = self._text(target)
+        confirm = self._text(confirm)
         cap = self._cap(domain)
         if cap is None:
             return {"ok": False, "error": f"unknown domain '{domain}'",
                     "domains": sorted(caps_pkg.REGISTRY.keys())}
-        act = (action or "").strip()
+        act = self._text(action)
         if act not in cap.ACTIONS:
             return {"ok": False, "error": f"unknown action '{act}' for domain '{domain}'",
                     "actions": sorted(cap.ACTIONS.keys())}
@@ -775,7 +988,7 @@ class KiraOpsPlugin(BasePlugin):
 
         params = self._normalize_params(domain, args or {}, target)
         if not decision.allowed:
-            return self._deny("ops_action", domain, act, sid, uid, decision.reason)
+            return self._deny("ops_action", domain, act, sid, uid, decision.reason, params)
 
         pre = cap.preflight(act, params)
         if pre:
@@ -787,7 +1000,8 @@ class KiraOpsPlugin(BasePlugin):
                                                        "params": params, "key": key}, sid, uid)
             ok_tok, payload = self.confirm.take(confirm, sid, uid)
             if not ok_tok:
-                return {"ok": False, "error": f"confirm token rejected: {payload}"}
+                return self._deny("ops_action", domain, act, sid, uid,
+                                  f"confirm token rejected: {payload}")
             return await self._execute_write(cap, act, payload.get("params") or params, key,
                                              sid, uid, tool="ops_action")
         return await self._execute_write(cap, act, params, key, sid, uid, tool="ops_action")
@@ -813,13 +1027,16 @@ class KiraOpsPlugin(BasePlugin):
     async def ops_store(self, event: KiraMessageBatchEvent, action: str, keyword: str = "",
                         author: str = "", tag: str = "", plugin_id: str = "",
                         force: bool = False, confirm: str = ""):
-        act = (action or "").strip()
+        act = self._text(action)
+        keyword = self._text(keyword)
+        author = self._text(author)
+        tag = self._text(tag)
+        plugin_id = self._text(plugin_id)
+        confirm = self._text(confirm)
         sid = self._sid(event)
         uid = self._uid(event)
         if act == "sources":
-            return {"ok": True, "store_url": self.store.store_url,
-                    "proxy": self.store.proxy or "(auto)", "cache_ttl": self.store.cache_ttl,
-                    "cached": self.store._cache is not None}
+            return {"ok": True, **self.store.status()}
         if act == "search":
             decision = self.engine.evaluate(sid, "store.search", kind="read")
             if not decision.allowed:
@@ -829,7 +1046,8 @@ class KiraOpsPlugin(BasePlugin):
             key = f"store.{act}"
             decision = self.engine.evaluate(sid, key, kind="write")
             if not decision.allowed:
-                return self._deny("ops_store", "store", act, sid, uid, decision.reason)
+                return self._deny("ops_store", "store", act, sid, uid, decision.reason,
+                                  {"plugin_id": plugin_id, "force": force})
             if decision.need_confirm and not confirm:
                 payload = {"cap": "store", "action": act,
                            "params": {"plugin_id": plugin_id, "force": force or act == "update"},
@@ -838,7 +1056,8 @@ class KiraOpsPlugin(BasePlugin):
             if confirm:
                 ok_tok, payload = self.confirm.take(confirm, sid, uid)
                 if not ok_tok:
-                    return {"ok": False, "error": f"confirm token rejected: {payload}"}
+                    return self._deny("ops_store", "store", act, sid, uid,
+                                      f"confirm token rejected: {payload}")
                 plugin_id = (payload.get("params") or {}).get("plugin_id", plugin_id)
                 force = (payload.get("params") or {}).get("force", force)
             result = await self.install_from_store(plugin_id, force=force or act == "update")
@@ -856,14 +1075,20 @@ class KiraOpsPlugin(BasePlugin):
          "required": ["token"]}
     )
     async def ops_confirm(self, event: KiraMessageBatchEvent, token: str):
+        token = self._text(token)
         sid = self._sid(event)
         uid = self._uid(event)
         ok_tok, payload = self.confirm.take(token, sid, uid)
         if not ok_tok:
+            self.audit.write(kind="deny", tool="ops_confirm", domain="master",
+                             action="confirm", sid=sid, uid=uid, ok=False,
+                             error=str(payload))
             return {"ok": False, "error": f"confirm failed: {payload}"}
         cap = self._cap(payload.get("cap"))
         if cap is None:
-            return {"ok": False, "error": "capability no longer exists"}
+            return self._deny("ops_confirm", str(payload.get("cap") or "unknown"),
+                              str(payload.get("action") or "unknown"), sid, uid,
+                              "capability no longer exists")
         act = payload.get("action")
         params = payload.get("params") or {}
         key = payload.get("key") or f"{cap.name}.{act}"
@@ -872,7 +1097,7 @@ class KiraOpsPlugin(BasePlugin):
         else:
             decision = self.engine.evaluate(sid, key, kind="write")
         if not decision.allowed:
-            return self._deny("ops_confirm", cap.name, act, sid, uid, decision.reason)
+            return self._deny("ops_confirm", cap.name, act, sid, uid, decision.reason, params)
         pre = cap.preflight(act, params)
         if pre:
             return self._deny("ops_confirm", cap.name, act, sid, uid, pre)
@@ -916,7 +1141,11 @@ class KiraOpsPlugin(BasePlugin):
 
     @register.page(
         "/index",
-        menu=PageMenu(label={"zh": "运行自控台", "en": "Ops Console"}, icon="Monitor", order=86),
+        # icon: an SVG shipped with the plugin (v2.34.5+) - a control panel with a
+        # gauge, deliberately unlike the Element Plus "Monitor" glyph other
+        # plugins already use in the sidebar.
+        menu=PageMenu(label={"zh": "运行自控台", "en": "Ops Console"},
+                      icon="assets/icon.svg", order=86),
     )
     def page(self):
         return PluginPage.from_folder("./web")
@@ -926,10 +1155,7 @@ class KiraOpsPlugin(BasePlugin):
         plugins = pm.list_plugins() if pm else []
         sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
         mcp = getattr(getattr(self.ctx, "message_processor", None), "mcp_manager", None)
-        try:
-            sessions = self.ctx.session_mgr.get_session_info() or []
-        except Exception:
-            sessions = []
+        sessions, _skipped = self.session_inventory()
         provs = getattr(self.ctx, "provider_mgr", None)
         return {
             "ok": True,
@@ -943,14 +1169,23 @@ class KiraOpsPlugin(BasePlugin):
                 "providers": len(provs.get_all_providers() or {}) if provs else 0,
                 "mcp": len(mcp.servers) if mcp else 0,
                 "sessions": len(sessions),
-                "backups": len(self.backups.list(500)),
+                "backups": self.backups.count(),
                 "pending_confirms": self.confirm.pending_count,
             },
             "conflicts": self.conflicts(),
             "agent": {
-                "enabled": bool(pm.is_plugin_enabled("agent")) if pm and pm.has_plugin("agent") else False,
+                "installed": bool(pm and pm.has_plugin("agent")),
+                "enabled": bool(pm and pm.has_plugin("agent") and pm.is_plugin_enabled("agent")),
             },
+            "lang": self._panel_lang(),
         }
+
+    def _panel_lang(self) -> str:
+        try:
+            lang = str(self.ctx.get_lang() or "en").lower()
+        except Exception:
+            lang = "zh"
+        return "zh" if lang.startswith("zh") else "en"
 
     @staticmethod
     def _manifest_version() -> str:
@@ -1021,3 +1256,31 @@ class KiraOpsPlugin(BasePlugin):
     async def api_describe(self):
         load_all()
         return {"ok": True, "capabilities": [c(self).describe() for c in caps_pkg.REGISTRY.values()]}
+
+    # ==================================================================
+    # extension point: kira_ops.register_capability
+    # ==================================================================
+
+    @on.custom_event(event_name="kira_ops.register_capability")
+    async def register_capability(self, event, *_):
+        """Let another plugin contribute an extra domain without touching caps/.
+
+        Payload: ``{"class": <Capability subclass>}`` (or ``{"capability": cls}``).
+        The class must declare ``name`` and ``ACTIONS``; registration is
+        rejected when the name is taken, illegal or the shape is wrong.
+        """
+        payload = getattr(event, "payload", None) or {}
+        cap_cls = payload.get("class") or payload.get("capability")
+        source = getattr(event, "source_plugin", "unknown")
+        ok, detail = caps_pkg.register_capability(cap_cls)
+        if ok:
+            self.caps[cap_cls.name] = cap_cls(self)
+            self.log(f"capability '{cap_cls.name}' contributed by plugin '{source}'")
+        else:
+            logger.warning(f"[kira_ops] rejected capability from '{source}': {detail}")
+        return {"ok": ok, "detail": detail}
+
+
+# Tool results are stringified by the framework when the tool message is built:
+# render them as compact JSON instead of a Python dict repr (see Payload).
+wrap_tool_results(KiraOpsPlugin)

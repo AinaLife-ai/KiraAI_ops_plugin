@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..core.redact import check_field_write, flatten
-from . import Capability, fail, ok, register
+from . import Capability, fail, ok, paged, register
 
 
 @register
@@ -25,6 +25,28 @@ class ProviderCap(Capability):
     def _pm(self):
         return getattr(self.ctx, "provider_mgr", None)
 
+    def _models(self, pm, pid: str) -> tuple:
+        """Return (models, note).
+
+        ``ProviderManager.get_models()`` maps every ``model_config`` key through
+        the ``ModelType`` enum and raises ValueError for an unknown key (e.g. a
+        legacy ``vlm`` entry in an older config). The framework's own WebUI
+        reads ``model_config`` raw for exactly this reason, so fall back to the
+        raw config instead of failing the whole provider domain.
+        """
+        try:
+            return pm.get_models(pid) or {}, ""
+        except Exception as exc:
+            note = f"framework model index unavailable ({exc}); showing the raw config"
+            try:
+                providers = self.plugin.kira_config.get("providers", {}) or {}
+                raw = (providers.get(pid) or {}).get("model_config") or {}
+                fallback = {str(k): dict(v or {}) for k, v in raw.items()
+                            if isinstance(v, dict)}
+                return fallback, note
+            except Exception:
+                return {}, note
+
     # ------------------------------------------------------------------
 
     async def handle_read(self, action, params):
@@ -33,19 +55,24 @@ class ProviderCap(Capability):
             return fail("provider manager is unavailable")
         if action == "list":
             items = []
-            for pid in (pm.get_all_providers() or {}).keys():
+            configured = list((self.plugin.kira_config.get("providers", {}) or {}).keys())
+            known = list((pm.get_all_providers() or {}).keys())
+            for pid in sorted(set(known) | set(configured)):
                 info = pm.get_provider_info(pid)
-                models = pm.get_models(pid) or {}
-                n = sum(len(v or {}) for v in models.values())
-                items.append({
+                models, note = self._models(pm, pid)
+                entry = {
                     "provider_id": pid,
                     "name": getattr(info, "provider_name", "") or pid,
                     "format": getattr(info, "provider_type", "") or "",
-                    "model_count": n,
+                    "model_count": sum(len(v or {}) for v in models.values()),
                     "model_types": sorted(models.keys()),
-                })
+                    "active": pid in known,
+                }
+                if note:
+                    entry["warning"] = note
+                items.append(entry)
             items.sort(key=lambda x: x["name"].lower())
-            return ok(count=len(items), items=items)
+            return ok(**paged(items, params, default=50))
         if action == "info":
             pid = str(params.get("provider_id") or "").strip()
             info = pm.get_provider_info(pid)
@@ -57,10 +84,22 @@ class ProviderCap(Capability):
                       config=self.plugin.mask(dict(info.provider_config or {})))
         if action == "models":
             pid = str(params.get("provider_id") or "").strip()
-            models = pm.get_models(pid)
-            if models is None:
+            if not pid:
+                return fail("provider_id is required")
+            if not pm.get_provider_info(pid):
                 return fail(f"provider '{pid}' not found")
-            return ok(provider_id=pid, models=self.plugin.mask(models))
+            models, note = self._models(pm, pid)
+            counts = {str(k): len(v or {}) for k, v in models.items()}
+            if params.get("full"):
+                data = ok(provider_id=pid, counts=counts, models=self.plugin.mask(models))
+            else:
+                # ids only: the full per-model config costs hundreds of chars and
+                # is rarely needed - pass args={"full": true} for it.
+                data = ok(provider_id=pid, counts=counts,
+                          models={str(k): sorted(v or {}) for k, v in models.items()})
+            if note:
+                data["warning"] = note
+            return data
         if action == "fetch_remote":
             pid = str(params.get("provider_id") or "").strip()
             mtype = str(params.get("model_type") or "llm")
@@ -69,7 +108,7 @@ class ProviderCap(Capability):
                 if hasattr(remote, "__await__"):
                     remote = await remote
             except Exception as exc:
-                return fail(f"fetch_remote_models failed: {exc}")
+                return fail(f"fetch_remote_models failed: {exc!r}")
             ids = []
             for m in remote or []:
                 if isinstance(m, dict):
@@ -176,6 +215,6 @@ class ProviderCap(Capability):
             try:
                 pm.set_provider(pid, cur)
             except Exception as exc:
-                return fail(f"provider config saved but re-instantiate failed: {exc}")
+                return fail(f"provider config saved but re-instantiate failed: {exc!r}")
             return ok(provider_id=pid, applied=sorted(str(k) for k in cfg.keys()))
         return fail(f"unknown write action '{action}'")

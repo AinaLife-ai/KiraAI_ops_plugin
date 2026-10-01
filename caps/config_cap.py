@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import json
+
 from . import Capability, fail, ok, register
+
+# config.get without a path used to return the whole system config (43k+
+# characters with a realistic provider set). The top-level summary keeps the
+# shape without the payload, and a single subtree is clipped to this size.
+MAX_VALUE_CHARS = 12000
 
 
 @register
 class ConfigCap(Capability):
     name = "config"
     ACTIONS = {
-        "get": ("read", False, "读取系统配置（敏感字段打码；可指定子树）"),
+        "get": ("read", False, "读取系统配置（敏感字段打码；可指定子树，不指定只回顶层概况）"),
         "set": ("write", False, "写入系统配置（黑名单拦截敏感字段；写前自动备份）"),
     }
 
@@ -17,6 +24,18 @@ class ConfigCap(Capability):
         return self.plugin.kira_config
 
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _summary(value) -> dict:
+        """Describe a subtree without shipping its contents."""
+        if isinstance(value, dict):
+            return {"type": "object", "keys": sorted(str(k) for k in value.keys())[:30],
+                    "size": len(value)}
+        if isinstance(value, list):
+            return {"type": "list", "size": len(value)}
+        if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+            return {"type": type(value).__name__, "value": value}
+        return {"type": "string", "size": len(str(value))}
 
     def handle_read(self, action, params):
         cfg = self._cfg()
@@ -28,8 +47,18 @@ class ConfigCap(Capability):
                 value = cfg.get_config(path)
                 if value is None:
                     return fail(f"config path '{path}' not found")
-                return ok(path=path, value=self.plugin.mask(value))
-            return ok(config=self.plugin.mask(dict(cfg)))
+                masked = self.plugin.mask(value)
+                text = json.dumps(masked, ensure_ascii=False, default=str)
+                if len(text) > MAX_VALUE_CHARS:
+                    return ok(path=path, truncated=True, size=len(text),
+                              note=f"节点过大（{len(text)} 字符），请再往下指定一层 path",
+                              preview=text[:MAX_VALUE_CHARS])
+                return ok(path=path, value=masked)
+            summary = {str(k): self._summary(cfg.get(k)) for k in cfg.keys()}
+            return ok(
+                note="未指定 path：只回顶层概况。读取具体节点请传 path，例如 bot_config.bot",
+                sections=summary,
+            )
         return fail(f"unknown read action '{action}'")
 
     # ------------------------------------------------------------------
@@ -75,8 +104,8 @@ class ConfigCap(Capability):
         if not check["ok"]:
             return fail("; ".join(check["violations"]))
         if check["secrets"]:
-            return fail("secret fields are write-protected: "
-                        + ", ".join(f"{p}" for p, _k in check["secrets"]))
+            return fail("sensitive fields are write-protected (change them in the "
+                        "KiraAI WebUI): " + ", ".join(f"{p}" for p, _k in check["secrets"]))
 
         merged = self.plugin.deep_merge(target, patch)
         # write back in place, then persist

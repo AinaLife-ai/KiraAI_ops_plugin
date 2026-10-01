@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, fail, ok, register
+from . import Capability, fail, ok, paged, register
 
 
 @register
@@ -21,7 +21,7 @@ class BackupCap(Capability):
         if not bm:
             return fail("backup manager is unavailable")
         if action == "list":
-            return ok(count=len(bm.list(200)), items=bm.list(100))
+            return ok(**paged(bm.list(200), params, default=20))
         return fail(f"unknown read action '{action}'")
 
     def backup_label(self, action, params):

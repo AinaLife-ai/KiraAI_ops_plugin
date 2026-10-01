@@ -15,8 +15,8 @@ from . import Capability, fail, ok, register
 class AgentPolicyCap(Capability):
     name = "agent"
     ACTIONS = {
-        "get": ("read", False, "读取 agent 插件的文件/命令访问策略"),
-        "info": ("read", False, "读取 agent 插件可用工具与启用状态"),
+        "get": ("read", False, "读取 agent 插件的文件/命令访问策略（含是否已安装/启用）"),
+        "info": ("read", False, "读取 agent 插件可用工具与安装/启用状态"),
         "set": ("write", False, "修改 agent 插件策略（文件/命令访问名单与路径；受字段与路径保护约束）"),
     }
 
@@ -41,6 +41,13 @@ class AgentPolicyCap(Capability):
             cfg = {}
         return cfg
 
+    @staticmethod
+    def _state(pm) -> tuple:
+        """(installed, enabled) - is_plugin_enabled() defaults to True for
+        unknown ids, so an uninstalled plugin would otherwise look enabled."""
+        installed = bool(pm.has_plugin("agent"))
+        return installed, bool(installed and pm.is_plugin_enabled("agent"))
+
     # ------------------------------------------------------------------
 
     def handle_read(self, action, params):
@@ -52,8 +59,9 @@ class AgentPolicyCap(Capability):
             cfg = self._policy()
             if cfg is None:
                 return fail("plugin manager is unavailable")
-            enabled = bool(pm.is_plugin_enabled("agent"))
+            installed, enabled = self._state(pm)
             return ok(
+                installed=installed,
                 plugin_enabled=enabled,
                 running=inst is not None,
                 file_access=cfg.get("file_access") or {},
@@ -62,8 +70,10 @@ class AgentPolicyCap(Capability):
         if action == "info":
             cfg = self._policy() or {}
             tools = cfg.get("tools") or {}
+            installed, enabled = self._state(pm)
             return ok(
-                plugin_enabled=bool(pm.is_plugin_enabled("agent")),
+                installed=installed,
+                plugin_enabled=enabled,
                 enabled_tools=list(tools.get("enabled_tools") or []),
                 hint="file/command execution is delegated to the builtin agent plugin",
             )

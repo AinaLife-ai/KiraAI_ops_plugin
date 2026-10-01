@@ -8,7 +8,7 @@ from pathlib import Path
 
 from core.utils.path_utils import get_data_path
 
-from . import Capability, fail, ok, register
+from . import Capability, fail, ok, paged, register, to_int
 
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
@@ -57,7 +57,7 @@ class SkillCap(Capability):
                 "path": str(s.path),
             } for s in sm.skills_info]
             items.sort(key=lambda x: (not x["enabled"], x["name"].lower()))
-            return ok(count=len(items), items=items)
+            return ok(**paged(items, params, default=50))
         if action == "info":
             s, err = self._skill(params.get("name"))
             if err:
@@ -74,9 +74,8 @@ class SkillCap(Capability):
                 text = path.read_text(encoding="utf-8")
             except Exception as exc:
                 return fail(f"cannot read SKILL.md: {exc}")
-            limit = int(params.get("limit") or 4000)
-            return ok(name=s.name, content=text[:max(100, limit)],
-                      truncated=len(text) > max(100, limit))
+            limit = to_int(params.get("limit"), 4000, 100, 20000)
+            return ok(name=s.name, content=text[:limit], truncated=len(text) > limit)
         if action == "scope":
             s, err = self._skill(params.get("name"))
             if err:

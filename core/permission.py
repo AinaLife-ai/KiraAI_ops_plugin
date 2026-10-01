@@ -131,8 +131,8 @@ class PermissionEngine:
     # ------------------------------------------------------------------
 
     def mask_for_read(self, data):
-        from .redact import mask_data
-        return mask_data(data, self.protected.get("read_mask") or [])
+        from .redact import mask_data, with_floor
+        return mask_data(data, with_floor(self.protected.get("read_mask")))
 
     def check_field_write(self, key: str, restrict: bool = False):
         from .redact import check_field_write

@@ -1,6 +1,23 @@
-"""Store package: listing client + staged install helpers."""
+"""Store package: listing client + framework-backed install helpers."""
 
-from .store_client import StoreClient, PLUGIN_ID_RE
-from .installer import install_plugin_dir, install_skill_dir
+from .installer import (
+    extract_zip_safely,
+    install_plugin_from_direct_url,
+    install_plugin_from_repo,
+    install_plugin_from_zip_bytes,
+    install_skill_dir,
+    install_skill_from_zip_bytes,
+)
+from .store_client import DEFAULT_STORE_URL, PLUGIN_ID_RE, StoreClient
 
-__all__ = ["StoreClient", "PLUGIN_ID_RE", "install_plugin_dir", "install_skill_dir"]
+__all__ = [
+    "StoreClient",
+    "PLUGIN_ID_RE",
+    "DEFAULT_STORE_URL",
+    "install_plugin_from_repo",
+    "install_plugin_from_zip_bytes",
+    "install_plugin_from_direct_url",
+    "install_skill_dir",
+    "install_skill_from_zip_bytes",
+    "extract_zip_safely",
+]

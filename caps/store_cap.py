@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, fail, ok, register
+from . import Capability, fail, ok, register, to_int
 
 
 @register
@@ -18,17 +18,13 @@ class StoreCap(Capability):
     async def handle_read(self, action, params):
         params = params or {}
         if action == "sources":
-            client = self.plugin.store
-            return ok(store_url=client.store_url,
-                      proxy=client.proxy or "(auto)",
-                      cache_ttl=client.cache_ttl,
-                      cached=client._cache is not None)
+            return ok(**self.plugin.store.status())
         if action == "search":
             return await self.plugin.store_search(
                 keyword=str(params.get("keyword") or ""),
                 author=str(params.get("author") or ""),
                 tag=str(params.get("tag") or ""),
-                limit=int(params.get("limit") or 0),
+                limit=to_int(params.get("limit"), 0, 0, 50),
             )
         return fail(f"unknown read action '{action}'")
 

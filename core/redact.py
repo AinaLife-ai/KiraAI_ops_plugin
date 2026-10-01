@@ -10,6 +10,23 @@ import re
 
 MASK = "***"
 
+# Applied on top of whatever the operator configured: these key names carry
+# credentials in every ecosystem we touch (HTTP Authorization/Bearer headers,
+# cookies, provider keys), so masking them must not be possible to switch off.
+ALWAYS_MASK = (
+    "api_key", "apikey", "authorization", "bearer", "cookie",
+    "secret", "password", "credential", "token", "private_key",
+)
+
+
+def with_floor(keywords) -> list:
+    """User keywords + the non-negotiable ones (deduplicated, order kept)."""
+    out = []
+    for key in list(keywords or []) + list(ALWAYS_MASK):
+        if key not in out:
+            out.append(key)
+    return out
+
 _SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
 
 
@@ -84,7 +101,7 @@ def flatten(data, prefix: str = "") -> list:
 def check_field_write(key, protected: dict, restrict: bool = False):
     """Return (ok, reason) for writing a single field."""
     protected = protected or {}
-    if key_matches(key, protected.get("write_deny") or []):
+    if key_matches(key, with_floor(protected.get("write_deny"))):
         return False, f"field '{key}' is on the write deny list"
     if restrict and not key_matches(key, protected.get("write_allow") or []):
         return False, f"field '{key}' is not on the write allow list"
@@ -112,7 +129,7 @@ def check_patch(patch, protected: dict, restrict: bool = False) -> dict:
         if not ok:
             result["violations"].append(f"{path}: {why}")
             continue
-        if key_matches(key, protected.get("read_mask") or []):
+        if key_matches(key, with_floor(protected.get("read_mask"))):
             result["secrets"].append((path, key))
     result["ok"] = not result["violations"]
     return result

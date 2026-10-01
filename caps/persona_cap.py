@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import Capability, fail, ok, register
+from . import Capability, fail, ok, paged, register, to_int
 
 
 @register
@@ -39,7 +39,7 @@ class PersonaCap(Capability):
                 "active": bool(p.is_active),
                 "length": len(p.content or ""),
             } for p in personas]
-            return ok(count=len(items), items=items)
+            return ok(**paged(items, params, default=50))
         if action == "get_active":
             try:
                 p = await pm.get_active_persona()
@@ -47,8 +47,9 @@ class PersonaCap(Capability):
                 return fail(f"failed to read active persona: {exc}")
             if not p:
                 return fail("no active persona")
+            limit = to_int(params.get("limit"), 4000, 100, 20000)
             return ok(id=p.id, name=p.name or "", format=p.format or "",
-                      content=(p.content or "")[:int(params.get("limit") or 4000)])
+                      content=(p.content or "")[:limit])
         if action == "info":
             pid = str(params.get("persona_id") or "").strip() or None
             try:
@@ -57,9 +58,10 @@ class PersonaCap(Capability):
                 return fail(f"failed to read persona: {exc}")
             if not p:
                 return fail(f"persona '{pid or '(active)'}' not found")
+            limit = to_int(params.get("limit"), 4000, 100, 20000)
             return ok(id=p.id, name=p.name or "", format=p.format or "",
                       active=bool(p.is_active),
-                      content=(p.content or "")[:int(params.get("limit") or 4000)])
+                      content=(p.content or "")[:limit])
         return fail(f"unknown read action '{action}'")
 
     # ------------------------------------------------------------------
