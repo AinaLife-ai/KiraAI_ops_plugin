@@ -412,7 +412,7 @@ core.utils.network.download_file        → 支持 max_bytes（2.34.6+）
 | 低 | 安装/备份同步文件 IO 阻塞事件循环、面板每次读几百个 `_meta.json` | `asyncio.to_thread` + `BackupManager.count()` |
 | 低 | 每次改配置都刷两条启动告警 | 每条只告警一次 |
 | 低 | 面板只有中文、回滚不能 force | 中英双语 + force 勾选 + agent 状态卡片 |
-| 低 | manifest/README 指向不存在的仓库 | 改真仓库，作者 `AinaLife-ai +znq19` |
+| 低 | manifest/README 指向不存在的仓库 | 改真仓库，作者 `AiriLife-ai+znq19` |
 | **严重** | `log.read_file` = 「data/ 下任意文件读取」，可绕过打码读密钥与聊天记忆（第四轮发现） | 限定只读日志文件 + 路径保护（§15.1） |
 | **严重** | 打码盲区：`Authorization` / `Bearer` / `Cookie` 不在表里，MCP 头明文外泄 | 新增不可配置的打码底线 `ALWAYS_MASK` |
 | **严重** | 畸形 session id 会写坏 `chat_memory.json`，令框架会话枚举永久 IndexError（波及内置插件） | 写入校验 + 容错枚举 + 可修复 |

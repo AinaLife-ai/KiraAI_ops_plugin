@@ -8,7 +8,7 @@
 
 - 版本：**1.1.0** ｜ 要求：KiraAI **≥ 2.34.6**（用到 2.34.6 的 `download_file(max_bytes)`、
   2.34.5 的内置 `agent` 插件、2.34.4 的 MCP 单工具开关、2.34.0 的 `multi_select` 动态源）
-- 作者：**AinaLife-ai +znq19** ｜ 仓库：https://github.com/znq19/KiraAI_ops_plugin
+- 作者：**AiriLife-ai+znq19** ｜ 仓库：https://github.com/znq19/KiraAI_ops_plugin
 
 ---
 
@@ -262,6 +262,6 @@ kira_ops/
 
 - 框架要求：`core_version >= 2.34.6`。缺能力时能自动降级（例如没有内置 `agent` 插件时，
   `agent` 域明确报告未安装而不是报错）。
-- 版本：1.1.0 ｜ 作者：AinaLife-ai +znq19
+- 版本：1.1.0 ｜ 作者：AiriLife-ai+znq19
 - 仓库：https://github.com/znq19/KiraAI_ops_plugin
 - 变更历史见 `CHANGELOG.md`，设计说明见 `kira_ops_设计方案_v0.5.md`。
