@@ -182,6 +182,19 @@ def main():
     check("every tab has a matching pane", panes_exist)
 
     # ---------------------------------------------------------------- assets
+    def manifest_icon_asset():
+        """If the manifest declares an icon it must ship and stay inside the root."""
+        manifest = json.loads((PLUGIN_DIR / "manifest.json").read_text(encoding="utf-8"))
+        for field in ("icon", "icon-dark"):
+            rel = manifest.get(field)
+            if not rel:
+                continue
+            asset = (PLUGIN_DIR / rel).resolve()
+            assert asset.is_file(), f"manifest {field} missing: {rel}"
+            assert asset.is_relative_to(PLUGIN_DIR.resolve()), f"{field} escapes plugin root: {rel}"
+            assert asset.suffix.lower() in (".png", ".svg", ".jpg", ".jpeg", ".webp"), rel
+    check("the manifest icon ships with the plugin", manifest_icon_asset)
+
     def menu_icon_asset():
         """The sidebar icon must ship with the plugin and stay inside the root."""
         main_py = (PLUGIN_DIR / "main.py").read_text(encoding="utf-8")

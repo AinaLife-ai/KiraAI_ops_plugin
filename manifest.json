@@ -18,5 +18,6 @@
       "display_name": "Kira 运行自控台",
       "description": "给 KiraAI 的运行自控台：用合并后的少量工具统一查看与热管理插件、技能、Provider、MCP、会话、人设、配置、日志与插件商店；带白/黑名单访问控制、风险分级、自动备份、审计留痕与完整 WebUI 面板。"
     }
-  }
+  },
+  "icon": "assets/icon.png"
 }

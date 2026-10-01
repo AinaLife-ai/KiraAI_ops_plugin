@@ -75,8 +75,13 @@
   选型过程：做了 9 版候选（控制台窗/提示符/六边形/仪表盘/二合一…），
   全部渲染成 16/18/20/24/32px 在明暗两种底色下对比，淘汰了 16px 下会糊掉的方案，
   最后按"18px 菜单实际尺寸"定稿。
-- **插件图标**：提供 10 张 Agnes（`agnes-image-2.5-flash`）生成候选（5 张主题图标风 + 5 张动漫立绘），
-  附 256/48px 缩略预览便于判断小尺寸可读性；选定后一条命令切换（见工作区 `set_icon.sh`）。
+- **插件图标（最终）**：采用用户自备的立绘（银白侧马尾 · 白/深蓝科技外套 · 黑过膝袜 · 坐在发光
+  OPS 面板上），裁正方形 → **512×512 PNG** 写入 `assets/icon.png`，`manifest.icon` 指向它。
+  验证：`/api/plugins/kira_ops/icon` → **200 image/png (247 KB)**，`PluginInfo.icon` 正确解析。
+  原图与 256/512 版本归档在共享区 `kira_ops_icons_prompts/chosen/`。
+- 过程中共产出 **62 张候选**（Agnes 2.5 Flash，含 2K 档），全部保留在
+  `/var/minis/attachments/kira_ops_icons/`；其中 **47–54 的提示词已归档**到共享区
+  `kira_ops_icons_prompts/`（含纯角色段、专属设计手法、逐字节一致的原始请求体、256px 缩略图）。
 - 新增回归测试：菜单图标 SVG 必须随插件存在、不能被路径穿越、必须是 SVG 且带 `currentColor`。
 
 ### 多实例实测（第五轮：按"每个实例一份完整目录树"的真实部署形态）
@@ -203,7 +208,7 @@
 - 文档：README 与设计文档全面修订（仓库地址、作者、core_version、安全说明、
   安装/更新与回滚流程、扩展点用法、测试清单）。
 
-### 测试（47 → 107 项）
+### 测试（47 → 109 项）
 
 - 新增 `tests/test_integration_real.py`（**48 项**）：**用真实框架对象**（KiraConfig /
   DatabaseService / ProviderManager / FuncToolManager / PersonaManager / SessionManager /
@@ -214,7 +219,7 @@
   **证明不了契约**，class-vs-instance 与陈旧子模块两个 bug 正是这样漏过去的。
 - `tests/test_kira_ops.py` 17 → **21 项**（新增 `apply_limit` / 日志截断 / brief 裁剪 / 能力名校验）。
 - 集成套件新增「回滚点绝不写入别的实例」断言（含把回滚点伪造成另一棵树的反向验证）。
-- 新增 `tests/test_panel_contract.py`（**7 项**）：面板静态契约（JS 可解析、元素 id/页签/
+- 新增 `tests/test_panel_contract.py`（**9 项**，含菜单 SVG 与 manifest 图标的资产校验）：面板静态契约（JS 可解析、元素 id/页签/
   API 路径/配置路径/载荷字段交叉校验、表格行字段），用 node --check + 正则自动跟随代码演进。
 - 集成套件 40 → **48 项**：新增 `read_file` 范围、打码底线、并发快照唯一性、审计体积上限、
   畸形参数免疫、畸形 session id 拒写与脏键修复（含对历史脏数据的自动修复断言）。

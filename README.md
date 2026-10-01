@@ -218,7 +218,7 @@ await self.ctx.emit_custom_event("kira_ops.register_capability", {"class": MyCap
 `name` 合法且未被占用、`ACTIONS` 非空且每项是 `(kind, dangerous, description)`、`kind ∈ {read, write}`。
 注册后即可用 `ops_read(domain="mycap", action="ping")`，并自动受权限引擎与审计约束。
 
-### 自测（共 **107** 项，全部离线可跑）
+### 自测（共 **109** 项，全部离线可跑）
 
 | 套件 | 项数 | 覆盖 |
 | --- | --- | --- |
@@ -226,7 +226,7 @@ await self.ctx.emit_custom_event("kira_ops.register_capability", {"class": MyCap
 | `tests/test_live_ops.py` | 14 | 桩上下文驱动 ops_status / ops_read 六域 / ops_config 拒密钥 / 高危令牌与会话绑定 / ops_panic / 审计落盘 / 商店搜索 |
 | `tests/test_live_ops2.py` | 16 | provider 五条路径、persona 三条、mcp 三条、config 写入、agent 策略路径守卫、control 开关与令牌门 |
 | `tests/test_integration_real.py` | 49 | **真实框架对象**加载插件并逐域驱动：12 域全部只读动作 + 更新后子模块必须是新代码 + 恶意压缩包必须被拒 + 全部修复点的反向断言 |
-| `tests/test_panel_contract.py` | 7 | 面板静态契约：JS 可解析（node --check）、元素 id / 页签 / API 路径 / 配置路径 / 载荷字段交叉校验 |
+| `tests/test_panel_contract.py` | 9 | 面板静态契约：JS 可解析（node --check）、元素 id / 页签 / API 路径 / 配置路径 / 载荷字段交叉校验 |
 | `tests/validate_schema.py` | — | schema 与 `core_version` 校验 |
 
 ```bash
