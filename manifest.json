@@ -2,7 +2,7 @@
   "plugin_id": "kira_ops",
   "display_name": "Kira Ops Console",
   "version": "1.1.0",
-  "author": "AinaLife-ai +znq19",
+  "author": "AiriLife-ai+znq19",
   "core_version": ">=2.34.6",
   "repo": "https://github.com/znq19/KiraAI_ops_plugin",
   "description": "KiraAI runtime control console: a small set of merged LLM tools to inspect and hot-manage plugins, skills, providers, MCP, sessions, personas, configs, logs and the plugin store - with whitelist/blacklist access control, risk levels, automatic backups, an audit trail and a full WebUI panel.",

@@ -43,7 +43,7 @@
   （实际用到 v2.34.0 的 multi_select 动态源、v2.34.4 的 MCP 单工具开关、
   v2.34.5 的内置 agent 插件、v2.34.6 的 `download_file(max_bytes=)`）。
 - **修复：manifest/README 指向不存在的仓库** → `https://github.com/znq19/KiraAI_ops_plugin`；
-  作者改为 `AinaLife-ai +znq19`。
+  作者改为 `AiriLife-ai+znq19`。
 
 ### 中
 
