@@ -24,7 +24,7 @@ class SubagentCap(Capability):
         "info":             ("read", False, "查看 subagent 状态与结果（结果有长度上限）"),
         "preset_list":      ("read", False, "列出 subagent 预设摘要"),
         "preset_info":      ("read", False, "读取单个 subagent 预设完整配置"),
-        "preset_save":      ("write", False, "新建或更新 subagent 预设（standard，无需确认）"),
+        "preset_save":      ("write", False, "新建或更新 subagent 预设（persona/custom/mixed；standard，无需确认）"),
         "preset_set_scope": ("write", False, "设置/清除预设的会话范围（standard，无需确认）"),
         "preset_delete":    ("write", False, "删除 subagent 预设（standard，无需确认）"),
     }

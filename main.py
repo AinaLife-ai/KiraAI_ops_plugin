@@ -1,4 +1,4 @@
-"""Kira Ops Console - runtime control console for KiraAI (v1.2.2).
+"""Kira Ops Console - runtime control console for KiraAI (v1.2.3).
 
 A small, merged tool surface (ops_status / ops_read / ops_config /
 ops_action / ops_store / ops_confirm / ops_panic) backed by:

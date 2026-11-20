@@ -6,7 +6,9 @@
 
 面向所有 KiraAI 部署，不绑定任何特定群、特定用户或特定目录，装上就能用。
 
-- 版本：**1.2.2** ｜ 要求：KiraAI **≥ 2.34.6**，兼容 **3.0/3.1/3.2**（含 v3.0.0-rc.1；特征识别，不绑版本号）。
+- 版本：**1.2.3** ｜ 要求：KiraAI **≥ 2.34.6**，兼容 **3.0/3.1/3.2**（含 v3.0.0-rc.1、v3.2.1；特征识别，不绑版本号）。
+  v1.2.3 起：对齐 3.2.1 的 subagent `mixed`（persona + 自定义提示词）和会话感知模型查找；
+  内部 ID 解析、会话详情及存在性检查在新接口上只读取元数据，不读取对话正文。
   v1.2.2 起：Skill/MCP 的能力域、`ops_status` 与控制台共用同一管理器入口，数量不再静默变 0；
   支持 IM/subagent 分类计数与筛选、内部 ID、父子关系、3.2 会话级模型设置，以及 subagent 预设的全局查看和增删改/范围管理。
   新增 subagent 普通查看和预设写操作均为 **standard 默认权限、无需确认**；不新增工具，仍复用 7 个 OPS 工具。
@@ -29,7 +31,7 @@
 | 管 Provider | 查看（密钥打码）、增改删模型、同步远端模型、健康检查 |
 | 管 MCP | 增改删服务器、启停、单工具开关、会话范围 |
 | 管会话 | IM/subagent 筛选、内部 ID、标题、能力覆盖、3.2 会话级模型、记忆条数、清记忆、删除（联动清理技能/MCP/subagent 预设范围） |
-| 管 subagent | 全局查看子代理状态/结果；预设新建、修改、删除与会话范围（普通操作 standard 直接执行，不新增确认门槛） |
+| 管 subagent | 全局查看子代理状态/结果；persona/custom/mixed 预设新建、修改、删除与会话范围（普通操作 standard 直接执行，不新增确认门槛） |
 | 管人设 | 查看列表与正文、切换激活（改内容默认只读，可放开） |
 | 改配置 | 系统配置与插件配置热修改，敏感字段一律拒绝写入 |
 | 看日志 | 最近日志、关键词搜索、日志文件概况、按关键词读文件尾部（**单条自动截断，不爆上下文**） |
@@ -254,7 +256,7 @@ await self.ctx.emit_custom_event("kira_ops.register_capability", {"class": MyCap
 `name` 合法且未被占用、`ACTIONS` 非空且每项是 `(kind, dangerous, description)`、`kind ∈ {read, write}`。
 注册后即可用 `ops_read(domain="mycap", action="ping")`，并自动受权限引擎与审计约束。
 
-### 自测（共 **175** 项，全部离线可跑；17 项 3.2 合约测试在旧版自动跳过）
+### 自测（3.2.1 共 **178** 项；3.2.0 共 175 项；旧版 158 项，专属套件自动跳过）
 
 | 套件 | 项数 | 覆盖 |
 | --- | --- | --- |
@@ -268,6 +270,7 @@ await self.ctx.emit_custom_event("kira_ops.register_capability", {"class": MyCap
 | `tests/test_gaps.py` | 6 | 覆盖盲区：plugin.config_set / provider.health / skill.set_scope / 面板 API |
 | `tests/test_races.py` | 6 | 并发：双密码只执行一次、多请求一密码、热禁用、慢动作不阻塞、TTL 边界、池上限 |
 | `tests/test_320_regressions.py` | 17 | 真实 3.2 正式接线：2 Skill/2 MCP 三端一致、subagent 与预设 CRUD、会话模型、正常/异常写、脱敏、路径边界、原子安装、重定向与并发 |
+| `tests/test_321_regressions.py` | 3 | 3.2.1 元数据解析、mixed persona+custom 实际组合、会话感知模型实际选择；旧版自动跳过 |
 | `tests/validate_schema.py` | — | schema 与 `core_version` 校验 |
 
 ```bash
@@ -277,6 +280,7 @@ python data/plugins/kira_ops/tests/test_live_ops.py
 python data/plugins/kira_ops/tests/test_live_ops2.py
 python data/plugins/kira_ops/tests/test_integration_real.py
 python data/plugins/kira_ops/tests/test_320_regressions.py
+python data/plugins/kira_ops/tests/test_321_regressions.py
 python data/plugins/kira_ops/tests/validate_schema.py
 ```
 
@@ -304,6 +308,6 @@ kira_ops/
 
 - 框架要求：`core_version >= 2.34.6`。缺能力时能自动降级（例如没有内置 `agent` 插件时，
   `agent` 域明确报告未安装而不是报错）。
-- 版本：1.2.2 ｜ 作者：AiriLife-ai+znq19
+- 版本：1.2.3 ｜ 作者：AiriLife-ai+znq19
 - 仓库：https://github.com/znq19/KiraAI_ops_plugin
 - 变更历史见 `CHANGELOG.md`，设计说明见 `kira_ops_设计方案_v0.5.md`。
