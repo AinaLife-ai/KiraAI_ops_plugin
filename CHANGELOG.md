@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.3
+
+补充适配 KiraAI **v3.2.1**（3.2.0 → 3.2.1 共 12 个上游提交逐项审查）。
+
+- **subagent mixed 提示词**：沿用框架实时 `SubAgentPreset` 校验，完整支持 `instruction_source=mixed`；persona_id 与自定义 instruction 在创建、更新、读取和执行配置中均保留。实测框架实际组合为 `persona 正文 + 自定义提示词`；预设增删改仍为 standard、无需确认。
+- **会话感知模型查找**：验证 OPS 写入的 `session.llm_model` 会被 3.2.1 `ProviderManager.get_default_llm(session=...)` 实际选中，而不只是落库。
+- **元数据读取**：内部 ID 解析、会话详情和存在性检查按特征检测使用 `include_content=False`；不再为这些路径读取对话正文。3.2.0 及更早版本保留原参数形态。
+- 审查 default decision 模型槽、内置工具结果渲染、预设不可用工具跳过、插件商店 README 和侧栏布局等变化；现有 OPS 公共契约无需额外改动。
+- 新增 `test_321_regressions.py` 3 项。最终：3.2.1 **178/178**，3.2.0 **175/175**，2.34.8/3.0.0-rc.1/3.0.0/3.1.2 各 **158/158**。
+
 ## 1.2.2
 
 完整适配 KiraAI v3.2.0，并修复 1.2.1 中分散入口与真实框架测试的遗漏。保持 **7 个工具**、旧字段和 2.x 回退，不引入任何常驻 prompt 注入。

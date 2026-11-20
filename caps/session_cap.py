@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 
 from . import Capability, fail, ok, paged, register
@@ -16,14 +17,24 @@ def _type_of(sid: str) -> str:
     return parts[1] if len(parts) >= 2 else ""
 
 
-async def _sm_get(sm, sid: str):
+def _has_parameter(func, name: str) -> bool:
+    try:
+        return name in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+async def _sm_get(sm, sid: str, include_content: bool = True):
     """取单个会话（不创建），两代统一返回 Session 或 None。"""
     if hasattr(sm, "get_session_info"):
         try:
             return sm.get_session_info(sid)
         except Exception:
             return None
-    res = sm.get_session(sid, ensure_session=False)
+    kwargs = {"ensure_session": False}
+    if _has_parameter(sm.get_session, "include_content"):
+        kwargs["include_content"] = include_content
+    res = sm.get_session(sid, **kwargs)
     if hasattr(res, "__await__"):
         res = await res
     return res
@@ -58,7 +69,9 @@ async def _resolve_sid(sm, target: str) -> str:
     if ":" in target or not hasattr(sm, "resolve_session"):
         return target
     try:
-        res = sm.resolve_session(target)
+        resolver = sm.resolve_session
+        kwargs = {"include_content": False} if _has_parameter(resolver, "include_content") else {}
+        res = resolver(target, **kwargs)
         if hasattr(res, "__await__"):
             res = await res
         if res is not None and getattr(res, "internal_id", None) == target:
@@ -152,7 +165,10 @@ class SessionCap(Capability):
             return sid in raw
         if hasattr(sm, "get_session"):
             try:
-                res = sm.get_session(sid, ensure_session=False)
+                kwargs = {"ensure_session": False}
+                if _has_parameter(sm.get_session, "include_content"):
+                    kwargs["include_content"] = False
+                res = sm.get_session(sid, **kwargs)
                 if hasattr(res, "__await__"):
                     res = await res
                 return res is not None
@@ -229,7 +245,7 @@ class SessionCap(Capability):
             known = await self._known(sm, sid)
             if known is not None and sid not in known:
                 return fail(f"session '{sid}' not found")
-            s = await _sm_get(sm, sid)
+            s = await _sm_get(sm, sid, include_content=False)
             if s is None:
                 return fail(f"session '{sid}' not found")
             merged = await _sm_caps(self.ctx, sid)
@@ -317,11 +333,10 @@ class SessionCap(Capability):
             return ok(session_id=sid,
                       capabilities=(await _sm_effective(sm, sid)) if caps else {})
         if action == "llm_model":
-            import inspect
             update = getattr(sm, "update_session", None)
-            if not callable(update) or "llm_model" not in inspect.signature(update).parameters:
+            if not callable(update) or not _has_parameter(update, "llm_model"):
                 return fail("per-session LLM selection requires a KiraAI version with llm_model support")
-            current = await _sm_get(sm, sid)
+            current = await _sm_get(sm, sid, include_content=False)
             if current is not None and (getattr(current, "kind", "im") or "im") == "subagent":
                 return fail("subagent models are managed by their preset; direct session overrides are not supported")
             if "llm_model" in params:

@@ -484,3 +484,9 @@ core.utils.network.download_file        → 支持 max_bytes（2.34.6+）
 - 配置 GET/POST 共用脱敏；文件路径用组件级 containment；动态 WebUI 数据只写 textContent。
 - 技能覆盖安装必须保留旧版直至新目录就绪，同一目标串行；插件更新预备回滚失败必须 fail-closed；直链重定向逐跳复验。
 - 真实框架测试必须复刻生产接线，并同时包含正常写成功与错误拒绝，禁止把任意异常当作预期拒绝。
+
+### 16.1 v1.2.3 / KiraAI 3.2.1
+
+- subagent 预设由框架实时模型校验，支持 persona/custom/mixed；mixed 必须同时保留 persona_id 与 instruction，禁止 OPS 自写一套提示词拼接。
+- 会话模型写入继续只负责官方规范化引用；实际选择交由 3.2.1 session-aware ProviderManager，并用集成测试验证。
+- 只读元数据的路径按参数特征使用 include_content=False，不绑版本号，不让旧版因新参数报错。
