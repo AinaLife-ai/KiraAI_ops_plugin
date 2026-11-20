@@ -23,7 +23,8 @@ def _ctx_extra() -> dict:
         from core.plugin import PluginContext as _P
         params = _i.signature(_P.__init__).parameters
         out = {f: None for f in ("prompt_mgr", "skills_mgr", "mcp_mgr", "message_history",
-                                 "image_desc_cache", "session_buffer_mgr", "message_delivery")
+                                 "image_desc_cache", "session_buffer_mgr", "message_delivery",
+                                 "message_router", "subagent_mgr", "_main_agent_runs")
                if f in params}
         if "sticker_manager" in params:
             out["sticker_manager"] = None
@@ -140,6 +141,7 @@ def pw_event(text=PASSWORD):
 
 
 async def boot():
+    (get_data_path() / "skills").mkdir(parents=True, exist_ok=True)
     kc = KiraConfig()
     dbm = DatabaseManager(f"sqlite+aiosqlite:///{(get_data_path() / 'kira_ops_race.db').as_posix()}")
     await dbm.init()

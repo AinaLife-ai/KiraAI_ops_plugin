@@ -153,7 +153,7 @@ def get_cap(name):
 
 def load_all() -> dict:
     from . import (  # noqa: F401  (import registers classes)
-        plugin_cap, skill_cap, provider_cap, mcp_cap, session_cap,
+        plugin_cap, skill_cap, provider_cap, mcp_cap, session_cap, subagent_cap,
         persona_cap, config_cap, log_cap, store_cap, agent_cap,
         control_cap, backup_cap,
     )

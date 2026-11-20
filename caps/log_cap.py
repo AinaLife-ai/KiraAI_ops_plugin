@@ -119,7 +119,7 @@ class LogCap(Capability):
             if candidate.is_absolute():
                 return fail("only paths under data/ are allowed")
             target = (data_dir / candidate).resolve()
-            if not str(target).startswith(str(root)):
+            if target != root and root not in target.parents:
                 return fail("path escapes data/")
             if not target.is_file():
                 return fail(f"file not found: {raw}")

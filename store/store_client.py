@@ -17,6 +17,7 @@ import re
 import socket
 import time
 import urllib.parse
+from pathlib import Path
 
 import httpx
 
@@ -161,3 +162,57 @@ class StoreClient:
             "cached": self._cache is not None,
             "installer": "framework (core.plugin.plugin_installer)",
         }
+
+
+async def download_direct_file(url: str, destination, *, validate_url=None,
+                               timeout: float = 60.0, max_bytes: int = 50 * 1024 * 1024,
+                               max_redirects: int = 5, _client_factory=None) -> Path:
+    """Download an OPS direct link with SSRF validation on *every* redirect.
+
+    The framework's generic downloader follows redirects automatically, which
+    cannot re-run OPS's private-address guard on the new target.  This helper is
+    intentionally limited to direct store/skill downloads; GitHub repository
+    installs still use the framework's official installer.
+    """
+    validator = validate_url or StoreClient.validate_direct_url
+    factory = _client_factory or httpx.AsyncClient
+    current = str(url or "").strip()
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    redirects = 0
+    try:
+        while True:
+            # DNS resolution is synchronous; do not block KiraAI's event loop.
+            reason = await asyncio.to_thread(validator, current)
+            if reason:
+                raise ValueError(f"download URL rejected: {reason}")
+            async with factory(timeout=timeout, follow_redirects=False) as client:
+                async with client.stream("GET", current) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ValueError("redirect response has no Location header")
+                        redirects += 1
+                        if redirects > max_redirects:
+                            raise ValueError(f"download exceeded {max_redirects} redirects")
+                        current = urllib.parse.urljoin(current, location)
+                        continue
+                    response.raise_for_status()
+                    length = response.headers.get("content-length")
+                    try:
+                        declared_size = int(length) if length else 0
+                    except (TypeError, ValueError):
+                        declared_size = 0
+                    if declared_size > max_bytes:
+                        raise ValueError(f"download exceeds the {max_bytes} byte limit")
+                    written = 0
+                    with target.open("wb") as output:
+                        async for chunk in response.aiter_bytes(64 * 1024):
+                            written += len(chunk)
+                            if written > max_bytes:
+                                raise ValueError(f"download exceeds the {max_bytes} byte limit")
+                            output.write(chunk)
+                    return target
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise

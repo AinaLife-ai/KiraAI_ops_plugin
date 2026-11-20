@@ -34,7 +34,8 @@ def _ctx_extra() -> dict:
         from core.plugin import PluginContext as _P
         params = _i.signature(_P.__init__).parameters
         out = {f: None for f in ("prompt_mgr", "skills_mgr", "mcp_mgr", "message_history",
-                                 "image_desc_cache", "session_buffer_mgr", "message_delivery")
+                                 "image_desc_cache", "session_buffer_mgr", "message_delivery",
+                                 "message_router", "subagent_mgr", "_main_agent_runs")
                if f in params}
         if "sticker_manager" in params:
             out["sticker_manager"] = None
@@ -125,6 +126,7 @@ def plugin_zip(plugin_id: str, value: int) -> bytes:
 
 
 async def boot():
+    (get_data_path() / "skills").mkdir(parents=True, exist_ok=True)
     kira_config = KiraConfig()
     db_manager = DatabaseManager(
         f"sqlite+aiosqlite:///{(get_data_path() / 'kira_ops_test.db').as_posix()}")
@@ -192,7 +194,7 @@ def main():
     check("7 tools registered by the framework",
           lambda: _assert(len(pm.get_plugin_tools("kira_ops")) == 7,
                           sorted(pm.get_plugin_tools("kira_ops"))))
-    check("12 capability domains", lambda: _assert(len(inst.caps) == 12, sorted(inst.caps)))
+    check("13 capability domains", lambda: _assert(len(inst.caps) == 13, sorted(inst.caps)))
     # note: no assertion on *values* here - the config file persists between
     # runs, so only the presence of every schema section is guaranteed.
     check("plugin config filled from schema",
@@ -304,10 +306,15 @@ def main():
     # ---------------------------------------------------------------- M1 phantom session
     def m1():
         ghost = f"qq:gm:ghost-{uuid.uuid4().hex[:8]}"
-        store = ctx.session_mgr.chat_memory
-        before = len(store)
-        r = run(inst.ops_read(ev, "session", "info", target=ghost))
-        after = len(store)
+        sm = ctx.session_mgr
+        if isinstance(getattr(sm, "chat_memory", None), dict):
+            before = len(sm.chat_memory)
+            r = run(inst.ops_read(ev, "session", "info", target=ghost))
+            after = len(sm.chat_memory)
+        else:
+            before = len(run(sm.get_sessions(include_content=False)))
+            r = run(inst.ops_read(ev, "session", "info", target=ghost))
+            after = len(run(sm.get_sessions(include_content=False)))
         _assert(not r.get("ok"), r)
         _assert(before == after, f"session count {before} -> {after}")
     check("M1 session.info never creates the session", m1)
@@ -517,7 +524,12 @@ def main():
         _assert(not blocked.get("ok"), blocked)
         _assert("sk-CANARY-DO-NOT-LEAK" not in json.dumps(blocked), blocked)
 
-        ctx.session_mgr.write_memory(ev.sid, [[{"role": "user", "content": "chat-canary"}]])
+        # The canary only needs to exist in the legacy file; writing it directly
+        # keeps this security test valid on both the JSON and SQLite generations.
+        memory_file = data / "memory" / "chat_memory.json"
+        memory_file.parent.mkdir(parents=True, exist_ok=True)
+        memory_file.write_text(json.dumps({ev.sid: {"memory": [
+            [{"role": "user", "content": "chat-canary"}]]}}), encoding="utf-8")
         mem = run(inst.ops_read(ev, "log", "read_file",
                                 args={"path": "memory/chat_memory.json"}))
         _assert(not mem.get("ok"), mem)
@@ -588,22 +600,36 @@ def main():
     check("malformed model arguments never raise", malformed_args)
 
     def session_id_validation():
-        """A junk session id used to poison chat_memory and break the framework."""
-        store = ctx.session_mgr.chat_memory
-        before = set(store)
+        """Malformed IDs must fail validation, not merely fail with a Python error."""
+        sm = ctx.session_mgr
+        raw = getattr(sm, "chat_memory", None)
+        before = (set(raw) if isinstance(raw, dict) else
+                  {s.sid for s in run(sm.get_sessions(include_content=False))})
         r = run(inst.ops_action(ev, "session", "title", target="x",
                                 args={"session_id": "x", "title": "boom"}))
         _assert(not r.get("ok"), r)
+        _assert("must look like" in r.get("error", ""), r)
+        _assert("TypeError" not in r.get("error", ""), r)
         for action in ("caps", "memory_clear"):
             out = run(inst.ops_action(ev, "session", action, target="bad-key",
                                       args={"session_id": "bad-key"}))
             _assert(not out.get("ok"), out)
-        _assert(set(store) == before, f"session store changed: {set(store) ^ before}")
+            _assert("TypeError" not in out.get("error", ""), out)
+        after = (set(raw) if isinstance(raw, dict) else
+                 {s.sid for s in run(sm.get_sessions(include_content=False))})
+        _assert(after == before, f"session store changed: {after ^ before}")
     check("malformed session ids are refused (no chat_memory poisoning)",
           session_id_validation)
 
     def session_inventory_tolerates_junk():
         """Even with a poisoned store, the session domain must keep working."""
+        if not hasattr(ctx.session_mgr, "get_session_info"):
+            # 3.x stores validated records in SQLite; the old raw-key poisoning
+            # fixture is inapplicable. Verify the equivalent public behavior.
+            listed = run(inst.ops_read(ev, "session", "list"))
+            _assert(listed.get("ok"), listed)
+            _assert(not listed.get("malformed_keys"), listed)
+            return
         store = ctx.session_mgr.chat_memory
         settings = dict(inst.cfg)
         settings["risk"] = dict(settings.get("risk") or {}, level="dangerous",

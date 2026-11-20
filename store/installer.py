@@ -24,6 +24,7 @@ import asyncio
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 import zipfile
@@ -158,6 +159,12 @@ async def _install_and_activate(
     """
     dest = _existing_plugin_dir(plugin_mgr, plugin_id) if update else None
     backup = await _stage_backup(dest)
+    if update and backup is None:
+        return {
+            "ok": False,
+            "plugin_id": plugin_id,
+            "error": "could not stage a rollback copy; update refused before replacing any files",
+        }
     try:
         installed = await runner(dest)
         warnings = await install_requirements(Path(installed), pypi_mirror=_pypi_mirror(plugin_mgr))
@@ -256,20 +263,16 @@ async def install_plugin_from_direct_url(
     timeout: float = 60.0,
 ) -> dict:
     """Install from an arbitrary https zip URL (SSRF-guarded, size-capped)."""
-    from core.utils.network import download_file
-
-    if validate_url is not None:
-        why = validate_url(url)
-        if why:
-            return {"ok": False, "plugin_id": plugin_id, "error": f"direct download blocked: {why}"}
+    from .store_client import download_direct_file
 
     temp_dir = Path(plugin_mgr.plugin_dir).parent / "temp"
-    temp_zip = temp_dir / f"kira_ops_{plugin_id}_{int(time.time())}.zip"
+    temp_zip = temp_dir / f"kira_ops_{plugin_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}.zip"
     try:
         temp_dir.mkdir(parents=True, exist_ok=True)
         try:
-            await download_file(
-                url, str(temp_zip), timeout=timeout, max_bytes=MAX_PLUGIN_ARCHIVE_BYTES
+            await download_direct_file(
+                url, temp_zip, validate_url=validate_url,
+                timeout=timeout, max_bytes=MAX_PLUGIN_ARCHIVE_BYTES,
             )
         except ValueError as exc:
             return {"ok": False, "plugin_id": plugin_id, "error": f"download rejected: {exc}"}
@@ -366,20 +369,58 @@ def extract_zip_safely(zip_path: Path, staging: Path, *, expected: Optional[str]
     return matches[0].parent
 
 
+_SKILL_INSTALL_LOCK = threading.Lock()
+
+
 def install_skill_dir(skills_root: Path, src_root: Path, skill_name: str,
                       overwrite: bool = False) -> Path:
-    """Move a staged skill tree into data/skills/<name>/."""
+    """Serialize target replacement; calls run in worker threads, not the loop."""
+    with _SKILL_INSTALL_LOCK:
+        return _install_skill_dir_locked(skills_root, src_root, skill_name, overwrite)
+
+
+def _install_skill_dir_locked(skills_root: Path, src_root: Path, skill_name: str,
+                              overwrite: bool = False) -> Path:
+    """Install a skill with a same-filesystem atomic swap and rollback.
+
+    Staging and rollback directories start with '_' so SkillsManager.scan_skill_dir
+    ignores them even if a refresh runs concurrently with the replacement.
+    """
     skills_root = Path(skills_root).resolve()
     skills_root.mkdir(parents=True, exist_ok=True)
     target = (skills_root / skill_name).resolve()
     if not target.is_relative_to(skills_root) or target.parent != skills_root:
         raise ValueError(f"illegal skill name: {skill_name!r}")
-    if target.exists():
-        if not overwrite:
-            raise FileExistsError(f"skill '{skill_name}' already exists (pass overwrite=true to replace)")
-        shutil.rmtree(target)
-    shutil.move(str(src_root), str(target))
-    return target
+    if target.exists() and not overwrite:
+        raise FileExistsError(f"skill '{skill_name}' already exists (pass overwrite=true to replace)")
+
+    token = uuid.uuid4().hex
+    staging = skills_root / f"_kira_ops_install_{token}"
+    previous = skills_root / f"_kira_ops_previous_{token}"
+    old_moved = False
+    try:
+        # Copy first: the archive workspace may be on another filesystem.
+        shutil.copytree(src_root, staging)
+        if target.exists():
+            os.replace(target, previous)
+            old_moved = True
+        try:
+            os.replace(staging, target)
+        except Exception:
+            if old_moved:
+                os.replace(previous, target)
+                old_moved = False
+            raise
+        if old_moved:
+            shutil.rmtree(previous, ignore_errors=True)
+            old_moved = False
+        return target
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        # If an unexpected failure happened after the old directory was moved,
+        # never leave the old version hidden in a rollback directory.
+        if old_moved and previous.exists() and not target.exists():
+            os.replace(previous, target)
 
 
 async def install_skill_from_zip_bytes(

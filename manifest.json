@@ -1,11 +1,11 @@
 {
   "plugin_id": "kira_ops",
   "display_name": "Kira Ops Console",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "author": "AiriLife-ai+znq19",
   "core_version": ">=2.34.6",
   "repo": "https://github.com/znq19/KiraAI_ops_plugin",
-  "description": "Lets the bot inspect and manage KiraAI on its own: one compact tool set covering plugins, skills, providers, MCP, sessions, personas, configs, logs and the store, guarded by access lists, capability levels and password approval for over-level actions. Every write is snapshotted and audited, with a full WebUI panel.",
+  "description": "Lets the bot inspect and manage KiraAI on its own: one compact tool set covering plugins, skills, providers, MCP, sessions/subagents, personas, configs, logs and the store, guarded by access lists, capability levels and password approval for over-level actions. Every write is snapshotted and audited, with a full WebUI panel.",
   "tags": [
     "management",
     "admin",
@@ -16,7 +16,7 @@
   "locales": {
     "zh": {
       "display_name": "Kira 运行自控台",
-      "description": "让 bot 自己查看和管理 KiraAI：一套合并工具覆盖插件、技能、Provider、MCP、会话、人设、配置、日志与商店，带名单/档位权限与超档密码授权。写操作自动备份可回滚、全程审计，另附完整 WebUI 面板。"
+      "description": "让 bot 自己查看和管理 KiraAI：一套合并工具覆盖插件、技能、Provider、MCP、会话/子代理、人设、配置、日志与商店，带名单/档位权限与超档密码授权。写操作自动备份可回滚、全程审计，另附完整 WebUI 面板。"
     }
   },
   "icon": "assets/icon.png"

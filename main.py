@@ -1,4 +1,4 @@
-"""Kira Ops Console - runtime control console for KiraAI (v1.1.0).
+"""Kira Ops Console - runtime control console for KiraAI (v1.2.2).
 
 A small, merged tool surface (ops_status / ops_read / ops_config /
 ops_action / ops_store / ops_confirm / ops_panic) backed by:
@@ -82,6 +82,7 @@ TARGET_ALIASES = {
     "provider": "provider_id",
     "mcp": "server_id",
     "session": "session_id",
+    "subagent": "agent_id",
     "persona": "persona_id",
     "backup": "backup_id",
 }
@@ -191,6 +192,67 @@ class KiraOpsPlugin(BasePlugin):
     def kira_config(self):
         return self.ctx.config
 
+    def _manager(self, modern_attr: str, legacy_attr: str):
+        """Resolve one shared manager without confusing absence with empty data.
+
+        KiraAI 3.x publishes skills/MCP on PluginContext; 2.x exposes them via
+        MessageProcessor. Every OPS path uses this helper so a compatibility
+        fix cannot land in one view while leaving another view stale.
+        """
+        mgr = getattr(self.ctx, modern_attr, None)
+        if mgr is not None:
+            return mgr
+        mp = getattr(self.ctx, "message_processor", None)
+        return getattr(mp, legacy_attr, None)
+
+    def _skills_manager(self):
+        return self._manager("skills_mgr", "skills_manager")
+
+    def _mcp_manager(self):
+        return self._manager("mcp_mgr", "mcp_manager")
+
+    def _provider_stats(self) -> dict:
+        """Keep the legacy active total and expose the configured total too."""
+        pm = getattr(self.ctx, "provider_mgr", None)
+        try:
+            active = len((pm.get_all_providers() if pm else {}) or {})
+        except Exception:
+            active = 0
+        try:
+            configured = len(self.kira_config.get("providers", {}) or {})
+        except Exception:
+            configured = 0
+        return {
+            "available": pm is not None,
+            # total historically meant active/loaded providers; keep it stable.
+            "total": active,
+            "active": active,
+            "configured": configured,
+        }
+
+    def _subagent_stats(self, sessions) -> dict:
+        """Content-free subagent/session-kind statistics for status and panel."""
+        mgr = getattr(self.ctx, "subagent_mgr", None)
+        agents = [s for s in sessions or []
+                  if (getattr(s, "kind", "im") or "im") == "subagent"]
+        states = {}
+        for session in agents:
+            data = getattr(session, "data", None)
+            state = data.get("subagent") if isinstance(data, dict) else None
+            status = str((state or {}).get("status") or "done") if isinstance(state, dict) else "done"
+            states[status] = states.get(status, 0) + 1
+        presets = getattr(mgr, "presets", None)
+        try:
+            preset_total = len(presets.list()) if presets is not None else 0
+        except Exception:
+            preset_total = 0
+        return {
+            "available": mgr is not None,
+            "total": len(agents),
+            "presets": preset_total,
+            "states": states,
+        }
+
     @property
     def lifecycle(self):
         """Best-effort handle on the running KiraLifecycle instance.
@@ -270,7 +332,7 @@ class KiraOpsPlugin(BasePlugin):
     def log(self, message: str):
         logger.info(f"[kira_ops] {message}")
 
-    async def session_inventory(self) -> tuple:
+    async def session_inventory(self, kind: str = None) -> tuple:
         """List sessions, tolerating malformed keys in chat_memory.
 
         ``SessionManager.get_session_info()`` (no argument) splits every key on
@@ -286,10 +348,15 @@ class KiraOpsPlugin(BasePlugin):
         # 世代分流（特征识别）：2.x 有同步 get_session_info；3.0 rc.1 起全异步
         if not hasattr(sm, "get_session_info"):
             try:
-                return list(await sm.get_sessions(include_content=False) or []), []
+                kwargs = {"include_content": False}
+                if kind:
+                    kwargs["kind"] = kind
+                return list(await sm.get_sessions(**kwargs) or []), []
             except Exception as exc:
                 logger.warning(f"[kira_ops] session enumeration failed: {exc}")
                 return [], []
+        if kind not in (None, "", "im"):
+            return [], []  # 2.x only has IM chat_memory sessions
         try:
             return list(sm.get_session_info() or []), []
         except Exception as exc:
@@ -464,7 +531,7 @@ class KiraOpsPlugin(BasePlugin):
         anything is written under data/skills.
         """
         from core.plugin.plugin_installer import MAX_PLUGIN_ARCHIVE_BYTES
-        from core.utils.network import download_file
+        from .store.store_client import download_direct_file
 
         target_url = str(url or "").strip()
         if "github.com" in target_url:
@@ -480,12 +547,14 @@ class KiraOpsPlugin(BasePlugin):
             return {"ok": False, "error": f"download blocked: {why}"}
 
         temp_dir = get_data_path() / "temp"
-        temp_zip = temp_dir / f"kira_ops_skill_{int(time.time())}.zip"
+        temp_zip = temp_dir / f"kira_ops_skill_{int(time.time())}_{secrets.token_hex(4)}.zip"
         try:
             temp_dir.mkdir(parents=True, exist_ok=True)
-            await download_file(target_url, str(temp_zip),
-                                timeout=max(60.0, self.store.timeout),
-                                max_bytes=MAX_PLUGIN_ARCHIVE_BYTES)
+            await download_direct_file(
+                target_url, temp_zip, validate_url=StoreClient.validate_direct_url,
+                timeout=max(60.0, self.store.timeout),
+                max_bytes=MAX_PLUGIN_ARCHIVE_BYTES,
+            )
             payload = await asyncio.to_thread(temp_zip.read_bytes)
         except Exception as exc:
             return {"ok": False, "error": f"skill download failed: {exc!r}"}
@@ -498,8 +567,8 @@ class KiraOpsPlugin(BasePlugin):
         except Exception as exc:
             return {"ok": False, "error": f"skill install failed: {exc!r}"}
 
-        sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
-        if sm:
+        sm = self._skills_manager()
+        if sm is not None:
             sm.skills_info = sm.scan_skill_dir()
         return {"ok": True, "name": name, "path": str(target)}
 
@@ -1082,7 +1151,7 @@ class KiraOpsPlugin(BasePlugin):
             "type": "object",
             "properties": {
                 "include": {"type": "string",
-                            "description": "逗号分隔的段落：resources,plugins,skills,providers,mcp,sessions,store,audit,permission（默认 resources,plugins,providers,permission）"},
+                            "description": "逗号分隔的段落：resources,plugins,skills,providers,mcp,sessions,subagents,store,audit,permission（默认 resources,plugins,providers,permission）"},
                 "detail": {"type": "string", "description": "brief（默认，长列表只给前几条+总数）或 full（完整明细）"}
             },
             "required": []
@@ -1120,21 +1189,49 @@ class KiraOpsPlugin(BasePlugin):
                 "conflicts": self.conflicts(),
             }
         if "skills" in parts:
-            sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
-            out["skills"] = {"total": len(sm.skills_info) if sm else 0,
-                             "enabled": sum(1 for s in (sm.skills_info if sm else []) if s.enabled)}
+            sm = self._skills_manager()
+            skills = list(getattr(sm, "skills_info", None) or []) if sm is not None else []
+            out["skills"] = {
+                "available": sm is not None,
+                "total": len(skills),
+                "enabled": sum(1 for s in skills if bool(getattr(s, "enabled", False))),
+            }
+            if sm is None:
+                out["skills"]["note"] = "skills manager is unavailable; total=0 is not an inventory"
         if "providers" in parts:
-            pmgr = getattr(self.ctx, "provider_mgr", None)
-            provs = pmgr.get_all_providers() if pmgr else {}
-            out["providers"] = {"total": len(provs or {})}
+            out["providers"] = self._provider_stats()
         if "mcp" in parts:
-            mcp = getattr(getattr(self.ctx, "message_processor", None), "mcp_manager", None)
-            out["mcp"] = {"total": len(mcp.servers) if mcp else 0}
-        if "sessions" in parts:
+            mcp = self._mcp_manager()
+            servers = list(getattr(mcp, "servers", None) or []) if mcp is not None else []
+            out["mcp"] = {
+                "available": mcp is not None,
+                "total": len(servers),
+                "enabled": sum(1 for s in servers if bool(getattr(s, "enabled", False))),
+            }
+            if mcp is None:
+                out["mcp"]["note"] = "MCP manager is unavailable; total=0 is not an inventory"
+        sessions = None
+        if "sessions" in parts or "subagents" in parts:
             sessions, skipped = await self.session_inventory()
-            out["sessions"] = {"total": len(sessions)}
+        if "sessions" in parts:
+            kinds = {}
+            for session in sessions:
+                key = str(getattr(session, "kind", "im") or "im")
+                kinds[key] = kinds.get(key, 0) + 1
+            out["sessions"] = {
+                "total": len(sessions),
+                "im": kinds.get("im", 0),
+                "subagents": kinds.get("subagent", 0),
+            }
+            other = len(sessions) - kinds.get("im", 0) - kinds.get("subagent", 0)
+            if other:
+                out["sessions"]["other"] = other
             if skipped:
                 out["sessions"]["malformed_keys"] = len(skipped)
+        if "subagents" in parts:
+            out["subagents"] = self._subagent_stats(sessions)
+            if not out["subagents"]["available"]:
+                out["subagents"]["note"] = "subagent manager is unavailable on this KiraAI version"
         if "store" in parts:
             out["store"] = {"plugin": self.plugin_id, "takeover": bool(self.store_cfg.get("takeover_store", True)),
                             "cached": self.store._cache is not None}
@@ -1185,7 +1282,7 @@ class KiraOpsPlugin(BasePlugin):
 
     @register.tool(
         "ops_read",
-        "只读查看 Kira 各域明细。domain 可选：plugin, skill, provider, mcp, session, persona, config, log, store, backup, agent, control。"
+        "只读查看 Kira 各域明细。domain 可选：plugin, skill, provider, mcp, session, subagent, persona, config, log, store, backup, agent, control。"
         "action 常用：list / info / config_get / models / memory_count / content / tail / search / history。",
         {
             "type": "object",
@@ -1312,7 +1409,7 @@ class KiraOpsPlugin(BasePlugin):
         "skill(refresh/enable/disable/set_scope/install/remove)、"
         "provider(add_model/update_model/delete_model/sync/set_provider)、"
         "mcp(add/update/enable/disable/tool_toggle/scope/delete)、"
-        "session(title/caps/memory_clear/delete)、persona(set_active/create/update/delete)、"
+        "session(title/caps/llm_model/memory_clear/delete)、subagent(preset_save/preset_set_scope/preset_delete)、persona(set_active/create/update/delete)、"
         "backup(restore)、control(restart/shutdown)。"
         "高危动作先返回确认令牌，需再调 ops_confirm(token=...)。",
         {
@@ -1531,10 +1628,11 @@ class KiraOpsPlugin(BasePlugin):
     async def _panel_payload(self):
         pm = getattr(self.ctx, "plugin_mgr", None)
         plugins = pm.list_plugins() if pm else []
-        sm = getattr(getattr(self.ctx, "message_processor", None), "skills_manager", None)
-        mcp = getattr(getattr(self.ctx, "message_processor", None), "mcp_manager", None)
+        sm = self._skills_manager()
+        mcp = self._mcp_manager()
         sessions, _skipped = await self.session_inventory()
-        provs = getattr(self.ctx, "provider_mgr", None)
+        provider_stats = self._provider_stats()
+        subagent_stats = self._subagent_stats(sessions)
         return {
             "ok": True,
             "version": self._manifest_version(),
@@ -1543,10 +1641,20 @@ class KiraOpsPlugin(BasePlugin):
             "counts": {
                 "plugins": len(plugins),
                 "plugins_enabled": sum(1 for p in plugins if pm and pm.is_plugin_enabled(p.plugin_id)),
-                "skills": len(sm.skills_info) if sm else 0,
-                "providers": len(provs.get_all_providers() or {}) if provs else 0,
-                "mcp": len(mcp.servers) if mcp else 0,
+                "skills": len(getattr(sm, "skills_info", None) or []) if sm is not None else 0,
+                "skills_available": sm is not None,
+                "providers": provider_stats["total"],
+                "providers_available": provider_stats["available"],
+                "providers_active": provider_stats["active"],
+                "providers_configured": provider_stats["configured"],
+                "mcp": len(getattr(mcp, "servers", None) or []) if mcp is not None else 0,
+                "mcp_available": mcp is not None,
                 "sessions": len(sessions),
+                "sessions_im": sum(1 for s in sessions if (getattr(s, "kind", "im") or "im") == "im"),
+                "sessions_subagents": subagent_stats["total"],
+                "subagents": subagent_stats["total"],
+                "subagents_available": subagent_stats["available"],
+                "subagent_presets": subagent_stats["presets"],
                 "backups": self.backups.count(),
                 "pending_confirms": self.confirm.pending_count,
             },
@@ -1579,13 +1687,18 @@ class KiraOpsPlugin(BasePlugin):
     async def api_overview(self):
         return await self._panel_payload()
 
-    @register.api(method="GET", path="/config", auth=True)
-    async def api_get_config(self):
-        cfg = copy.deepcopy(self.cfg) if isinstance(self.cfg, dict) else {}
+    @staticmethod
+    def _public_config(config) -> dict:
+        """One masking contract for both config reads and write responses."""
+        cfg = copy.deepcopy(config) if isinstance(config, dict) else {}
         confirm = cfg.get("confirm")
         if isinstance(confirm, dict) and str(confirm.get("password") or ""):
             confirm["password"] = MASK  # never ship the real password to the browser
-        return {"ok": True, "config": cfg, "warnings": self.warnings}
+        return cfg
+
+    @register.api(method="GET", path="/config", auth=True)
+    async def api_get_config(self):
+        return {"ok": True, "config": self._public_config(self.cfg), "warnings": self.warnings}
 
     @register.api(method="POST", path="/config", auth=True)
     async def api_set_config(self, payload: dict):
@@ -1609,7 +1722,7 @@ class KiraOpsPlugin(BasePlugin):
         await pm.update_plugin_config(self.plugin_id, merged)
         self.audit.write(kind="write", tool="panel", domain="kira_ops", action="config",
                          ok=True, note="panel config update")
-        return {"ok": True, "config": merged}
+        return {"ok": True, "config": self._public_config(merged)}
 
     @register.api(method="POST", path="/panic", auth=True)
     async def api_panic(self, payload: dict):
