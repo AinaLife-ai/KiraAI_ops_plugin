@@ -18,8 +18,8 @@
       lang: 'EN',
       tabAccess: '访问控制', tabRisk: '风险分级', tabControl: '重启关机', tabProtected: '数据保护',
       tabBackup: '备份', tabAudit: '审计', tabStore: '商店',
-      cardPlugins: '插件', cardSkills: '技能', cardProviders: 'Provider', cardMcp: 'MCP',
-      cardSessions: '会话', cardLevel: '当前档位', cardPending: '待确认', cardBackups: '备份',
+      cardPlugins: '插件', cardSkills: '技能', cardProviders: 'Provider（已加载/已配置）', cardMcp: 'MCP',
+      cardSessions: '会话', cardSubagents: 'Subagent（会话/预设）', cardLevel: '当前档位', cardPending: '待确认', cardBackups: '备份',
       cardConflicts: '被接管的商店插件', cardAgent: 'agent 插件',
       agentOn: '已启用', agentOff: '未启用', agentMissing: '未安装',
       legendAccess: '会话名单（允许名单留空 = 放行所有；黑名单优先）',
@@ -83,8 +83,8 @@
       lang: '中',
       tabAccess: 'Access', tabRisk: 'Risk', tabControl: 'Restart', tabProtected: 'Protection',
       tabBackup: 'Backups', tabAudit: 'Audit', tabStore: 'Store',
-      cardPlugins: 'Plugins', cardSkills: 'Skills', cardProviders: 'Providers', cardMcp: 'MCP',
-      cardSessions: 'Sessions', cardLevel: 'Level', cardPending: 'Pending', cardBackups: 'Backups',
+      cardPlugins: 'Plugins', cardSkills: 'Skills', cardProviders: 'Providers (active/configured)', cardMcp: 'MCP',
+      cardSessions: 'Sessions', cardSubagents: 'Subagents (sessions/presets)', cardLevel: 'Level', cardPending: 'Pending', cardBackups: 'Backups',
       cardConflicts: 'Absorbed store plugin', cardAgent: 'agent plugin',
       agentOn: 'enabled', agentOff: 'disabled', agentMissing: 'not installed',
       legendAccess: 'Session lists (empty allow list = everyone; deny wins)',
@@ -157,6 +157,13 @@
     if (cls) n.className = cls
     if (html !== undefined) n.innerHTML = html
     return n
+  }
+  function appendTextCells(row, values) {
+    values.forEach(function (value) {
+      var cell = el('td')
+      cell.textContent = value == null ? '' : String(value)
+      row.appendChild(cell)
+    })
   }
   function token() {
     try { return localStorage.getItem('jwt_token') } catch (e) { return null }
@@ -346,7 +353,12 @@
     var box = $('#warnings')
     if (!warnings || !warnings.length) { box.classList.add('hide'); return }
     box.classList.remove('hide')
-    box.innerHTML = warnings.map(function (w) { return '⚠ ' + w }).join('<br>')
+    box.textContent = ''
+    warnings.forEach(function (w) {
+      var line = el('div')
+      line.textContent = '⚠ ' + w
+      box.appendChild(line)
+    })
   }
 
   function renderCards() {
@@ -356,12 +368,18 @@
     var perm = overview.permission || {}
     var agent = overview.agent || {}
     var agentText = !agent.installed ? t('agentMissing') : (agent.enabled ? t('agentOn') : t('agentOff'))
+    var skillText = counts.skills_available === false ? '—' : String(counts.skills || 0)
+    var mcpText = counts.mcp_available === false ? '—' : String(counts.mcp || 0)
+    var providerActive = typeof counts.providers_active === 'number' ? counts.providers_active : (counts.providers || 0)
+    var providerConfigured = typeof counts.providers_configured === 'number' ? counts.providers_configured : providerActive
+    var providerText = counts.providers_available === false ? '—' : (providerActive + '/' + providerConfigured)
     var rows = [
       [t('cardPlugins'), (counts.plugins_enabled || 0) + '/' + (counts.plugins || 0)],
-      [t('cardSkills'), counts.skills || 0],
-      [t('cardProviders'), counts.providers || 0],
-      [t('cardMcp'), counts.mcp || 0],
+      [t('cardSkills'), skillText],
+      [t('cardProviders'), providerText],
+      [t('cardMcp'), mcpText],
       [t('cardSessions'), counts.sessions || 0],
+      [t('cardSubagents'), counts.subagents_available === false ? '—' : ((counts.subagents || 0) + '/' + (counts.subagent_presets || 0))],
       [t('cardLevel'), perm.level || '-'],
       [t('cardPending'), counts.pending_confirms || 0],
       [t('cardBackups'), counts.backups || 0],
@@ -494,8 +512,7 @@
       (res.items || []).forEach(function (b) {
         var tr = el('tr')
         var label = (b.label || '') + (b.foreign ? ' ⚠ ' + t('foreign') : '')
-        tr.innerHTML = '<td>' + b.id + '</td><td>' + (b.created || '') + '</td><td>' +
-          label + '</td><td>' + (b.files || 0) + '</td>'
+        appendTextCells(tr, [b.id, b.created || '', label, b.files || 0])
         if (b.foreign) tr.title = t('foreignHint')
         var td = el('td')
         var forceWrap = el('label', 'inline')
@@ -540,9 +557,8 @@
     api('/audit?limit=50').then(function (res) {
       (res.items || []).slice().reverse().forEach(function (r) {
         var tr = el('tr')
-        tr.innerHTML = '<td>' + (r.ts || '') + '</td><td>' + (r.domain || '') + '</td><td>' +
-          (r.action || '') + '</td><td>' + (r.ok ? '✓' : '✗') + '</td><td>' +
-          ((r.err || r.note || '')).toString().slice(0, 60) + '</td>'
+        appendTextCells(tr, [r.ts || '', r.domain || '', r.action || '',
+          r.ok ? '✓' : '✗', ((r.err || r.note || '')).toString().slice(0, 60)])
         tbody.appendChild(tr)
       })
       if (!tbody.children.length) {

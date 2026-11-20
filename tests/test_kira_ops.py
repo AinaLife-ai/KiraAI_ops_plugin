@@ -349,11 +349,11 @@ def main():
     def t_caps():
         from plugins.kira_ops.caps import REGISTRY, load_all
         load_all()
-        expected = {"plugin", "skill", "provider", "mcp", "session", "persona",
+        expected = {"plugin", "skill", "provider", "mcp", "session", "subagent", "persona",
                     "config", "log", "store", "agent", "control", "backup"}
         missing = expected - set(REGISTRY.keys())
         assert not missing, f"missing caps: {missing}"
-    check("capability registry has all 12 domains", t_caps)
+    check("capability registry has all 13 domains", t_caps)
 
     # ---- new helpers: registry extension point, limit, log clipping -------
     def t_apply_limit():

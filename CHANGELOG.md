@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.2.2
+
+完整适配 KiraAI v3.2.0，并修复 1.2.1 中分散入口与真实框架测试的遗漏。保持 **7 个工具**、旧字段和 2.x 回退，不引入任何常驻 prompt 注入。
+
+### Skill / MCP / Provider
+
+- Skill/MCP 管理器解析统一为 `ctx.skills_mgr/mcp_mgr` 优先、旧 MessageProcessor 回退；能力域、`ops_status`、面板、技能安装后刷新、会话删除范围清理全部共用同一入口。
+- 修复真实安装 2 个 Skill/MCP 时面板和状态显示 0；manager 不可用时新增 availability/note，不再把“不可用”伪装成空清单。
+- 技能安装成功后立即刷新现代 manager；下载临时文件唯一化。
+- Provider 保留旧 `total`（active）并新增 active/configured 双口径，面板显示“已加载/已配置”。
+
+### 会话与 3.2 subagent
+
+- 修复 `SessionCap._bad_sid` 缺少 `@staticmethod` 导致 title/caps/memory_clear 固定 TypeError；相关写操作统一先验证目标存在，防止对不存在的 SID 执行写入。
+- `session.list` 在 3.x 使用 `get_session_message_counts()` 批量计数，不再为每个会话读取完整 content；支持 `kind` 筛选。
+- 会话保留原字段并新增 kind/internal_id/parent_id/时间/模型等 3.2 元数据；目标支持内部 ID。`session.llm_model` 使用官方模型解析与校验，null 清除；subagent 模型仍由预设管理，符合框架约束。
+- 新增现有工具下的 `subagent` 域（总计 13 域）：全局 list/info、预设 list/info/save/set_scope/delete。预设新建、更新、删除和范围修改均为 **standard 普通写，无需确认**；执行子代理仍使用 KiraAI 内置工具，不重复造工具。
+- 面板和 `ops_status` 增加 IM/subagent 分类、subagent 状态与预设计数；删除会话时联动清理 subagent 预设范围。
+
+### 安全与安装失败路径
+
+- POST `/config` 与 GET 共用脱敏，保存配置不再把真实确认密码带回浏览器。
+- `log.read_file` 改用路径组件 containment，阻止 `data/` 字符串前缀相同的兄弟目录逃逸。
+- 面板备份/审计动态单元格与警告改用 textContent，消除存储型 HTML 注入面。
+- 技能覆盖安装改为同文件系统 staging + 原子切换 + 旧目录恢复；同一目标串行，失败不丢旧版。
+- 插件更新无法预备回滚副本时，在替换任何文件前拒绝。
+- 直链下载不再自动跟随未检查的重定向：每一跳重新执行 HTTPS/私网地址校验，保留大小上限并清理失败残片；GitHub 仓库安装仍走框架官方安装器。
+
+### 验证
+
+- 修复真实框架测试的 3.2 上下文、传输桩和双世代会话断言，避免“代码 TypeError 也被当成预期拒绝”的假绿。
+- 新增 `test_320_regressions.py` 17 项：现代生产接线、三端计数、即时刷新、subagent CRUD/权限、会话模型与正常写、安全边界、原子/并发安装、备份失败、重定向和工具面。
+- 全套在 2.34.8、3.0.0-rc.1、3.0.0、3.1.2、3.2.0 验证；真实 GitHub 固定 commit ZIP 重定向下载通过；真实浏览器验证计数和恶意 HTML 不执行。
+
 ## 1.2.1
 
 适配 3.0 rc.1：会话域全异步化 + 模型域语义 + skills/mcp 入口（rc.1 实测三域破坏，多为静默）。

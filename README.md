@@ -1,12 +1,15 @@
 # Kira 运行自控台（kira_ops）
 
 给 **KiraAI** 用的运行自控台插件：让你（或者你的 AI）用一个统一入口，看懂并管理整个 KiraAI 的运行状态——
-插件、技能、Provider、MCP、会话、人设、系统配置、日志、插件商店，全都能查、能改、能热生效，
+插件、技能、Provider、MCP、会话/子代理、人设、系统配置、日志、插件商店，全都能查、能改、能热生效，
 而且**该拦的都拦得住、改坏了能回滚、干了什么都留痕**。
 
 面向所有 KiraAI 部署，不绑定任何特定群、特定用户或特定目录，装上就能用。
 
-- 版本：**1.2.1** ｜ 要求：KiraAI **≥ 2.34.6**，兼容 **3.0 全系列**（含 v3.0.0-rc.1；特征识别，不绑版本号）。
+- 版本：**1.2.2** ｜ 要求：KiraAI **≥ 2.34.6**，兼容 **3.0/3.1/3.2**（含 v3.0.0-rc.1；特征识别，不绑版本号）。
+  v1.2.2 起：Skill/MCP 的能力域、`ops_status` 与控制台共用同一管理器入口，数量不再静默变 0；
+  支持 IM/subagent 分类计数与筛选、内部 ID、父子关系、3.2 会话级模型设置，以及 subagent 预设的全局查看和增删改/范围管理。
+  新增 subagent 普通查看和预设写操作均为 **standard 默认权限、无需确认**；不新增工具，仍复用 7 个 OPS 工具。
   v1.2.1 起：会话域适配 rc.1 全异步会话接口（列举/详情/计数/清空/删除/能力读写全部双世代；
   清空只清对话内容、保留会话元数据）；模型域 `models` 展示带可读名（不再只显示内部 ID）、
   `add_model` 正确回填 3.0 生成的内部 ID；技能/MCP 域优先走 3.0 规范入口 `ctx.skills_mgr`/`ctx.mcp_mgr`。
@@ -20,12 +23,13 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 看状态 | 插件/技能/Provider/MCP/会话数量、启用情况、加载错误、权限档位、告警 |
+| 看状态 | 插件/技能/Provider/MCP/会话/subagent 数量、启用情况、加载错误、权限档位、告警 |
 | 管插件 | 启停、热重载、改配置、从商店安装/更新/卸载（带备份**和目录级回滚**） |
 | 管技能 | 刷新、启停、会话范围、查看 SKILL.md、安装/删除 |
 | 管 Provider | 查看（密钥打码）、增改删模型、同步远端模型、健康检查 |
 | 管 MCP | 增改删服务器、启停、单工具开关、会话范围 |
-| 管会话 | 标题、能力覆盖、记忆条数、清记忆、删除（联动清理技能/MCP 范围） |
+| 管会话 | IM/subagent 筛选、内部 ID、标题、能力覆盖、3.2 会话级模型、记忆条数、清记忆、删除（联动清理技能/MCP/subagent 预设范围） |
+| 管 subagent | 全局查看子代理状态/结果；预设新建、修改、删除与会话范围（普通操作 standard 直接执行，不新增确认门槛） |
 | 管人设 | 查看列表与正文、切换激活（改内容默认只读，可放开） |
 | 改配置 | 系统配置与插件配置热修改，敏感字段一律拒绝写入 |
 | 看日志 | 最近日志、关键词搜索、日志文件概况、按关键词读文件尾部（**单条自动截断，不爆上下文**） |
@@ -250,19 +254,20 @@ await self.ctx.emit_custom_event("kira_ops.register_capability", {"class": MyCap
 `name` 合法且未被占用、`ACTIONS` 非空且每项是 `(kind, dangerous, description)`、`kind ∈ {read, write}`。
 注册后即可用 `ops_read(domain="mycap", action="ping")`，并自动受权限引擎与审计约束。
 
-### 自测（共 **158** 项，全部离线可跑）
+### 自测（共 **175** 项，全部离线可跑；17 项 3.2 合约测试在旧版自动跳过）
 
 | 套件 | 项数 | 覆盖 |
 | --- | --- | --- |
-| `tests/test_kira_ops.py` | 25 | 权限引擎全链路、打码与写保护、确认令牌、备份快照/冲突/清理、导入冒烟、12 域注册表、`limit`/日志截断/brief 裁剪/能力名校验 |
+| `tests/test_kira_ops.py` | 25 | 权限引擎全链路、打码与写保护、确认令牌、备份快照/冲突/清理、导入冒烟、13 域注册表、`limit`/日志截断/brief 裁剪/能力名校验 |
 | `tests/test_live_ops.py` | 14 | 桩上下文驱动 ops_status / ops_read 六域 / ops_config 拒密钥 / 高危令牌与会话绑定 / ops_panic / 审计落盘 / 商店搜索 |
 | `tests/test_live_ops2.py` | 16 | provider 五条路径、persona 三条、mcp 三条、config 写入、agent 策略路径守卫、control 开关与令牌门 |
-| `tests/test_integration_real.py` | 49 | **真实框架对象**加载插件并逐域驱动：12 域全部只读动作 + 更新后子模块必须是新代码 + 恶意压缩包必须被拒 + 全部修复点的反向断言 |
+| `tests/test_integration_real.py` | 49 | **真实框架对象**加载插件并逐域驱动：13 域注册与原有只读动作 + 更新后子模块必须是新代码 + 恶意压缩包必须被拒 + 全部修复点的反向断言 |
 | `tests/test_panel_contract.py` | 9 | 面板静态契约：JS 可解析（node --check）、元素 id / 页签 / API 路径 / 配置路径 / 载荷字段交叉校验 |
 | `tests/test_dm_confirm.py` | 20 | 密码确认授权：多会话扇出（群亦可）/ 任一批准 / 批准全链路 / standard 越档 / control 开关+越权 / 底线不越权 / **插件从不向聊天发言** / 安装升级出清单 / 旧默认迁移 / 面板脱敏（真实框架） |
 | `tests/test_adversarial.py` | 13 | 对抗性审查：令牌越级/绑定、黑名单与全锁绝对性、密码不外泄、恶意配置与畸形入参、端到端链路 |
 | `tests/test_gaps.py` | 6 | 覆盖盲区：plugin.config_set / provider.health / skill.set_scope / 面板 API |
 | `tests/test_races.py` | 6 | 并发：双密码只执行一次、多请求一密码、热禁用、慢动作不阻塞、TTL 边界、池上限 |
+| `tests/test_320_regressions.py` | 17 | 真实 3.2 正式接线：2 Skill/2 MCP 三端一致、subagent 与预设 CRUD、会话模型、正常/异常写、脱敏、路径边界、原子安装、重定向与并发 |
 | `tests/validate_schema.py` | — | schema 与 `core_version` 校验 |
 
 ```bash
@@ -271,6 +276,7 @@ python data/plugins/kira_ops/tests/test_kira_ops.py
 python data/plugins/kira_ops/tests/test_live_ops.py
 python data/plugins/kira_ops/tests/test_live_ops2.py
 python data/plugins/kira_ops/tests/test_integration_real.py
+python data/plugins/kira_ops/tests/test_320_regressions.py
 python data/plugins/kira_ops/tests/validate_schema.py
 ```
 
@@ -298,6 +304,6 @@ kira_ops/
 
 - 框架要求：`core_version >= 2.34.6`。缺能力时能自动降级（例如没有内置 `agent` 插件时，
   `agent` 域明确报告未安装而不是报错）。
-- 版本：1.1.0 ｜ 作者：AiriLife-ai+znq19
+- 版本：1.2.2 ｜ 作者：AiriLife-ai+znq19
 - 仓库：https://github.com/znq19/KiraAI_ops_plugin
 - 变更历史见 `CHANGELOG.md`，设计说明见 `kira_ops_设计方案_v0.5.md`。

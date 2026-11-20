@@ -35,7 +35,8 @@ def _ctx_extra() -> dict:
         from core.plugin import PluginContext as _P
         params = _i.signature(_P.__init__).parameters
         out = {f: None for f in ("prompt_mgr", "skills_mgr", "mcp_mgr", "message_history",
-                                 "image_desc_cache", "session_buffer_mgr", "message_delivery")
+                                 "image_desc_cache", "session_buffer_mgr", "message_delivery",
+                                 "message_router", "subagent_mgr", "_main_agent_runs")
                if f in params}
         if "sticker_manager" in params:
             out["sticker_manager"] = None
@@ -188,6 +189,7 @@ def gm_event(text: str, group: str = "445566", sender: str = "769690776",
 
 
 async def boot():
+    (get_data_path() / "skills").mkdir(parents=True, exist_ok=True)
     kira_config = KiraConfig()
     db_manager = DatabaseManager(
         f"sqlite+aiosqlite:///{(get_data_path() / 'kira_ops_dm_test.db').as_posix()}")
@@ -226,7 +228,7 @@ async def boot():
     send_owner.message_delivery = _FakeDelivery()
 
     async def _send(session, chain):
-        return await MessageProcessor.send_message_chain(send_owner, session, chain)
+        return await send_owner.message_delivery.send_message_chain(session, chain)
 
     ctx.message_processor.send_message_chain = _send
     # 统一入口实例级接线：2.x 插件走 message_processor 委托，3.0 走 message_delivery ——

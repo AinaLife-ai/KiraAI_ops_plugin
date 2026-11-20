@@ -471,3 +471,16 @@ core.utils.network.download_file        → 支持 max_bytes（2.34.6+）
 3. **框架里"未知 id"的默认值往往是 True**（`is_plugin_enabled`），任何"是否可用"的判断都要
    `has_plugin and is_plugin_enabled`。
 4. **返回值必须设上限**：日志行、配置树、文件尾部都是"看起来小、实际能爆"的典型。
+
+---
+
+## 16. v1.2.2 / KiraAI 3.2 增补约束
+
+- Skill/MCP 只允许一个双世代解析助手：现代 PluginContext 优先，旧 MessageProcessor 回退；所有读、写、计数和刷新路径复用，禁止再次分散实现。
+- 仍为 7 个工具；新增第 13 个 `subagent` 能力域只负责全局查看和预设管理，不重复内置 spawn/followup/interrupt 工具。预设普通增删改与范围管理为 standard，无额外确认；已有高危规则不通过新入口绕过。
+- 会话计数保留 total，另增 IM/subagent 分类；列表支持 kind、内部 ID 和批量记忆计数。3.2 IM 会话模型设置走官方 resolver；subagent 模型仍由预设决定。
+- Provider 保留旧 active `total`，新增 active/configured，不通过改旧字段破坏调用方。
+- 所有新返回按需生成并有边界；不增加 system/chat_env 常驻注入，不改变正常状态的前缀缓存。
+- 配置 GET/POST 共用脱敏；文件路径用组件级 containment；动态 WebUI 数据只写 textContent。
+- 技能覆盖安装必须保留旧版直至新目录就绪，同一目标串行；插件更新预备回滚失败必须 fail-closed；直链重定向逐跳复验。
+- 真实框架测试必须复刻生产接线，并同时包含正常写成功与错误拒绝，禁止把任意异常当作预期拒绝。
